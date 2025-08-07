@@ -443,11 +443,12 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             await update.message.reply_text(f"⏳ Selling token `{input_mint}` for `{amount}` SOL...")
         
         tx_sig = await solana_client.perform_swap(
-            sender_private_key_json=wallet["private_key"],
-            amount_lamports=amount_lamports,
-            input_mint=input_mint,
-            output_mint=output_mint
+            wallet["private_key"],
+            amount_lamports,
+            input_mint,
+            output_mint
         )
+
 
         if tx_sig.startswith("Error"):
             await update.message.reply_text(f"❌ Swap failed: {tx_sig}")
