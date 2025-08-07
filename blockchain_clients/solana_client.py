@@ -28,9 +28,12 @@ class SolanaClient:
             return 0.0
 
     async def perform_swap(self, sender_private_key_json: str, amount_lamports: int,
-                           input_mint: str, output_mint: str) -> str:
+                       input_mint: str, output_mint: str) -> str:
         try:
-            keypair = Keypair.from_json_keypair(sender_private_key_json)
+            # ✅ Decode Base58 private key to bytes
+            key_bytes = base58.b58decode(sender_private_key_json)
+            keypair = Keypair.from_secret_key(key_bytes)
+
             public_key_str = str(keypair.pubkey())
 
             route = await get_swap_route(input_mint, output_mint, amount_lamports)
@@ -46,11 +49,10 @@ class SolanaClient:
             tx.sign([keypair])
             
             tx_sig = self.client.send_transaction(tx)
-            
             return str(tx_sig.value)
-
         except Exception as e:
             return f"Error: {e}"
+
 
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
