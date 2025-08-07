@@ -246,11 +246,11 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if command == "send":
-        try:
+        try: # Added try block for send command
             if len(args) == 0:
                 await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
                 return
-                
+
             match = re.match(r'^(\w+)\s+([\d.]+)$', args[0].strip())
             if not match:
                 await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
@@ -267,16 +267,23 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             if not wallet or not wallet["private_key"]:
                 await update.message.reply_text("❌ No Solana wallet found.")
                 return
-            
+
             tx = solana_client.send_sol(wallet["private_key"], to_addr, amount)
-            if tx:
-                await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown')
+
+            if tx and not tx.lower().startswith("error"):
+                solscan_link = f"https://solscan.io/tx/{tx}"
+                await update.message.reply_text(
+                    f"✅ Sent {amount} SOL!\nTx: [`{tx}`]({solscan_link})",
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
             else:
-                await update.message.reply_text("❌ Failed to send SOL. Please check your balance or recipient address.")
-        except (ValueError, AttributeError) as e:
+                await update.message.reply_text(f"❌ Failed to send SOL.\n{tx}", parse_mode='Markdown')
+
+        except (ValueError, AttributeError):
             await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
         except Exception as e:
-            print(f"Send error: {e}")  # Debug log
+            print(f"Send error: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
         return
 
@@ -285,33 +292,40 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             if len(args) == 0:
                 await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
                 return
-                
+
             parts = args[0].strip().split()
             if len(parts) != 3:
                 await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
                 return
-                
+
             token_addr, to_addr, amount_str = parts
             amount = float(amount_str)
-            
+
             if amount <= 0:
                 await update.message.reply_text("❌ Amount must be greater than 0")
                 return
-                
+
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
                 await update.message.reply_text("❌ No Solana wallet found.")
                 return
-            
+
             tx = solana_client.send_spl_token(wallet["private_key"], token_addr, to_addr, amount)
-            if tx:
-                await update.message.reply_text(f"✅ Sent {amount} SPL Token!\nTx: `{tx}`", parse_mode='Markdown')
+
+            if tx and not tx.lower().startswith("error"):
+                solscan_link = f"https://solscan.io/tx/{tx}"
+                await update.message.reply_text(
+                    f"✅ Sent {amount} SPL Token!\nTx: [`{tx}`]({solscan_link})",
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
             else:
-                await update.message.reply_text("❌ Failed to send SPL token.")
+                await update.message.reply_text(f"❌ Failed to send SPL token.\n{tx}", parse_mode='Markdown')
+
         except (ValueError, IndexError):
             await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
         except Exception as e:
-            print(f"SendToken error: {e}")  # Debug log
+            print(f"SendToken error: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
         return
 
