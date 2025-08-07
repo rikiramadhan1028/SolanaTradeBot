@@ -10,35 +10,12 @@ def init_db():
         conn = sqlite3.connect(DATABASE_NAME)
         cursor = conn.cursor()
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
-        cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_wallets (
                 user_id INTEGER PRIMARY KEY,
                 solana_private_key TEXT,
                 solana_address TEXT
             )
         """)
-        conn.commit()
-        conn.close()
-
-def get_setting(key):
-    with _db_lock:
-        conn = sqlite3.connect(DATABASE_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-
-def set_setting(key, value):
-    with _db_lock:
-        conn = sqlite3.connect(DATABASE_NAME)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
         conn.close()
 

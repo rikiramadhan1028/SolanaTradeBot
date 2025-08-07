@@ -16,6 +16,7 @@ from telegram.ext import (
     ConversationHandler
 )
 from dotenv import load_dotenv
+import re
 import asyncio
 
 # === Konfigurasi & Inisialisasi ===
@@ -150,14 +151,11 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             key_data = args[0]
             old_wallet = database.get_user_wallet(user_id)
             already_exists = old_wallet.get("address") is not None
-            
             pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(key_data)
             database.set_user_wallet(user_id, key_data, str(pubkey))
-            
             msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
             if already_exists: msg += "\n⚠️ Previous Solana wallet was overwritten."
-            await update.message.reply_text(msg, parse_mode='Markdown')
-            
+            await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
         except IndexError:
             await update.message.reply_text("❌ Invalid format. Use `import [private_key]`")
         except ValueError as e:
@@ -174,10 +172,9 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             if not wallet or not wallet["private_key"]:
                 await update.message.reply_text("❌ No Solana wallet found.")
                 return
-            
             tx = solana_client.send_sol(wallet["private_key"], to_addr, amount)
             if tx:
-                await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown')
+                await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
             else:
                  await update.message.reply_text("❌ Failed to send SOL. Please check your balance or recipient address.")
         except (ValueError, IndexError):
@@ -194,10 +191,9 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             if not wallet or not wallet["private_key"]:
                 await update.message.reply_text("❌ No Solana wallet found.")
                 return
-            
             tx = solana_client.send_spl_token(wallet["private_key"], token_addr, to_addr, amount)
             if tx:
-                await update.message.reply_text(f"✅ Sent {amount} SPL Token!\nTx: `{tx}`", parse_mode='Markdown')
+                await update.message.reply_text(f"✅ Sent {amount} SPL Token!\nTx: `{tx}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
             else:
                 await update.message.reply_text("❌ Failed to send SPL token.")
         except (ValueError, IndexError):
@@ -206,7 +202,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ Error: {e}")
         return
 
-    await update.message.reply_text("❌ Unrecognized command. Please use `import`, `send`, or `sendtoken`.")
+    await update.message.reply_text("❌ Unrecognized command. Please use `import`, `send`, or `sendtoken`.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -228,7 +224,8 @@ async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = query.from_user.id
     database.delete_user_wallet(user_id)
     await query.edit_message_text(f"🗑️ Your Solana wallet has been deleted.",
-                                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")]]))
+                                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")]])
+    )
 
 async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -244,6 +241,13 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query and query.data == 'back_to_main_menu':
+        await back_to_main_menu(update, context)
+        return ConversationHandler.END
+    return ConversationHandler.END
 
 # === Fungsi untuk Alur Percakapan Trading ===
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -263,10 +267,12 @@ async def handle_trade_type(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     trade_type = query.data.split('_')[1]
     context.user_data['trade_type'] = trade_type
     
+    keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
+    
     if trade_type == "buy":
-        await query.edit_message_text("📄 Please send the **token contract address** you want to buy.")
+        await query.edit_message_text("📄 Please send the **token contract address** you want to buy.", reply_markup=InlineKeyboardMarkup(keyboard))
     else: # sell
-        await query.edit_message_text("📄 Please send the **token contract address** you want to sell.")
+        await query.edit_message_text("📄 Please send the **token contract address** you want to sell.", reply_markup=InlineKeyboardMarkup(keyboard))
     
     return AWAITING_TOKEN_ADDRESS
 
@@ -274,13 +280,15 @@ async def handle_token_address(update: Update, context: ContextTypes.DEFAULT_TYP
     token_address = update.message.text.strip()
     context.user_data['token_address'] = token_address
     
+    keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
+    
     trade_type = context.user_data.get('trade_type')
     if trade_type == "buy":
         await update.message.reply_text(f"💰 You chose to **buy** `{token_address}`.\n\n"
-                                        f"Please send the amount of **SOL** you want to use.")
+                                        f"Please send the amount of **SOL** you want to use.", reply_markup=InlineKeyboardMarkup(keyboard))
     else: # sell
         await update.message.reply_text(f"💰 You chose to **sell** `{token_address}`.\n\n"
-                                        f"Please send the amount of **tokens** you want to sell.")
+                                        f"Please send the amount of **tokens** you want to sell.", reply_markup=InlineKeyboardMarkup(keyboard))
         
     return AWAITING_AMOUNT
 
@@ -288,7 +296,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
     if not wallet or not wallet["private_key"]:
-        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.")
+        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
         return ConversationHandler.END
     
     try:
@@ -304,7 +312,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         else: # sell
             input_mint = token_address
             output_mint = SOLANA_NATIVE_TOKEN_MINT
-            amount_lamports = int(amount * 1_000_000_000) # Assuming 6 decimals for most SPL tokens
+            amount_lamports = int(amount * 1_000_000_000) # Asumsi 6 desimal untuk SPL tokens
             await update.message.reply_text(f"⏳ Selling token `{input_mint}` for `{amount}` SOL...")
         
         tx_sig = await solana_client.perform_swap(
@@ -327,13 +335,9 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     except Exception as e:
         await update.message.reply_text(f"❌ An unexpected error occurred: {e}")
     
+    await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
 
-async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Trade has been cancelled.")
-    return ConversationHandler.END
-    
-# === Main function ===
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
@@ -343,25 +347,26 @@ def main() -> None:
 
     # ConversationHandler untuk alur trading
     trade_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(buy_sell, pattern="buy_sell")],
+        entry_points=[CallbackQueryHandler(buy_sell, pattern="^buy_sell$")],
         states={
             AWAITING_TRADE_TYPE: [CallbackQueryHandler(handle_trade_type, pattern=r"trade_.*")],
             AWAITING_TOKEN_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address)],
             AWAITING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_conversation), MessageHandler(filters.Regex("^/start$"), start)]
+        fallbacks=[CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"),
+                   CommandHandler("start", start)]
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(trade_conv_handler)
-    application.add_handler(CallbackQueryHandler(handle_assets, pattern="view_assets"))
-    application.add_handler(CallbackQueryHandler(handle_wallet_menu, pattern="menu_wallet"))
-    application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*"))
-    application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="back_to_main_menu"))
-    application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="import_wallet"))
+    application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))
+    application.add_handler(CallbackQueryHandler(handle_wallet_menu, pattern="^menu_wallet$"))
+    application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*$"))
+    application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"))
+    application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="^import_wallet$"))
     application.add_handler(CallbackQueryHandler(dummy_response, pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$"))
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
-    application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="send_asset"))
+    application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
 
     print("Bot is running...")
