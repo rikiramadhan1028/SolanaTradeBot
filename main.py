@@ -1,4 +1,3 @@
-# main.py
 import os
 import json
 import config
@@ -247,6 +246,11 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Trade has been cancelled.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+    return ConversationHandler.END
+
+# === Fungsi untuk Alur Percakapan Trading ===
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -335,10 +339,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
 
-async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Trade has been cancelled.")
-    return ConversationHandler.END
-    
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
@@ -354,7 +354,7 @@ def main() -> None:
             AWAITING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount)],
         },
         fallbacks=[
-            CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"),
+            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
             CommandHandler("start", start)
         ]
     )
