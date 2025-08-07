@@ -142,12 +142,15 @@ async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip().replace('\n', ' ')
-    command, *args = text.split(maxsplit=1)  # Hanya split sekali
+    command, *args = text.split(maxsplit=1)
     command = command.lower()
-    
+
     if command == "import":
+        if len(args) == 0:
+            await update.message.reply_text("❌ Invalid Format Use: `import [private_key]`", parse_mode="Markdown")
+            return
         try:
-            key_data = args[0]
+            key_data = args[0].strip()
             old_wallet = database.get_user_wallet(user_id)
             already_exists = old_wallet.get("address") is not None
             
