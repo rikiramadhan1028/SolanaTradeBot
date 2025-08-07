@@ -122,13 +122,14 @@ class SolanaClient:
                 payer=sender_pubkey
             )
             
-            # 2. Buat Transaction dengan Message dan from_keypairs
-            # Perhatikan bahwa kita meneruskan keypair di sini
-            tx = Transaction.new_with_message(
-                message,
-                [sender_keypair],
-                latest_blockhash
+            # 2. Buat Transaction dari Message dan recent_blockhash
+            tx = Transaction(
+                message=message,
+                recent_blockhash=latest_blockhash
             )
+            
+            # 3. Tandatangani transaksi menggunakan keypair
+            tx.sign([sender_keypair])
 
             # Kirim transaksi
             result = self.client.send_transaction(tx)
