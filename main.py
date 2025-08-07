@@ -213,35 +213,33 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         if len(args) == 0:
             await update.message.reply_text("❌ Invalid Format Use: `import [private_key]`", parse_mode="Markdown")
             return
-        try:
-            key_data = args[0].strip()
-            
-            # Validasi dan bersihkan private key
-            cleaned_key = validate_and_clean_private_key(key_data)
-            
-            old_wallet = database.get_user_wallet(user_id)
-            already_exists = old_wallet.get("address") is not None
-            
-            # Test private key sebelum menyimpan
-            try:
-                pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(cleaned_key)
-            except Exception as e:
-                await update.message.reply_text(f"❌ Invalid private key: {e}")
-                return
-            
-            database.set_user_wallet(user_id, cleaned_key, str(pubkey))
-            
-            msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
-            if already_exists: 
-                msg += "\n⚠️ Previous Solana wallet was overwritten."
-            await update.message.reply_text(msg, parse_mode='Markdown')
-            
-        except ValueError as e:
-            await update.message.reply_text(f"❌ Error importing Solana wallet: {e}")
-        except Exception as e:
-            print(f"Import error: {e}")  # Debug log
-            await update.message.reply_text(f"❌ An unexpected error occurred during import. Please check your private key format.")
-        return
+    try:
+        key_data = args[0].strip()
+        
+        # 💡 Deteksi & convert ke base58 jika perlu
+        cleaned_key = wallet_manager.validate_and_clean_private_key(key_data)
+
+        old_wallet = database.get_user_wallet(user_id)
+        already_exists = old_wallet.get("address") is not None
+
+        # 🧪 Ambil pubkey untuk verifikasi validitas
+        pubkey = wallet_manager.get_solana_pubkey_from_base58(cleaned_key)
+
+        # ✅ Simpan base58 private key
+        database.set_user_wallet(user_id, cleaned_key, pubkey)
+
+        msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
+        if already_exists:
+            msg += "\n⚠️ Previous Solana wallet was overwritten."
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Error importing Solana wallet: {e}")
+    except Exception as e:
+        print(f"Import error: {e}")  # Debug log
+        await update.message.reply_text(f"❌ An unexpected error occurred during import. Please check your private key format.")
+    return
+    
 
     if command == "send":
         try:

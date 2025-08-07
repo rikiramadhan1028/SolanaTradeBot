@@ -27,19 +27,21 @@ class SolanaClient:
             print(f"Error fetching Solana balance for {public_key_str}: {e}")
             return 0.0
 
-    async def perform_swap(self, sender_private_key_json: str, amount_lamports: int,
+    async def perform_swap(self, sender_private_key_base58: str, amount_lamports: int,
                        input_mint: str, output_mint: str) -> str:
         try:
-            # ✅ Decode Base58 private key to bytes
-            key_bytes = base58.b58decode(sender_private_key_json)
+            # Decode base58 private key and create Keypair
+            key_bytes = base58.b58decode(sender_private_key_base58)
             keypair = Keypair.from_secret_key(key_bytes)
 
             public_key_str = str(keypair.pubkey())
 
+            # Fetch swap route
             route = await get_swap_route(input_mint, output_mint, amount_lamports)
             if not route:
                 return "Error: No swap route found."
 
+            # Build transaction
             swap_transaction = await get_swap_transaction(route, public_key_str)
             if not swap_transaction:
                 return "Error: Could not build swap transaction."
@@ -48,6 +50,7 @@ class SolanaClient:
             tx = VersionedTransaction.deserialize(raw_tx)
             tx.sign([keypair])
             
+            # Send transaction
             tx_sig = self.client.send_transaction(tx)
             return str(tx_sig.value)
         except Exception as e:
