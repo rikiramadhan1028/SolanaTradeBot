@@ -115,18 +115,16 @@ class SolanaClient:
                 )
             )
 
-            # Buat pesan transaksi (cara yang lebih eksplisit)
-            message = Message(
+            # Buat transaksi dengan instruksi, payer, dan blockhash
+            tx = Transaction(
                 instructions=[transfer_instruction],
-                payer=sender_pubkey
+                payer=sender_pubkey,
+                recent_blockhash=latest_blockhash
             )
             
-            # Buat transaksi dari pesan dan blockhash
-            tx = Transaction(
-                message=message,
-                recent_blockhash=latest_blockhash,
-                signatures=[sender_keypair.sign(message.serialize())]
-            )
+            # Tandatangani transaksi menggunakan keypair
+            # Ini adalah cara yang benar dan modern
+            tx.sign([sender_keypair])
 
             # Kirim transaksi
             result = self.client.send_transaction(tx)
@@ -135,6 +133,7 @@ class SolanaClient:
         except Exception as e:
             print(f"Error sending SOL: {e}")
             return f"Error: {e}"
+
 
 
     def send_spl_token(self, private_key_base58: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
