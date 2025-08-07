@@ -2,7 +2,7 @@
 import httpx
 import json
 
-QUOTE_API_URL = "https://lite-api.jup.ag/swap/v1quote"
+QUOTE_API_URL = "https://lite-api.jup.ag/swap/v1/quote"
 SWAP_API_URL = "https://lite-api.jup.ag/swap/v1/swap"
 
 async def get_swap_route(input_mint: str, output_mint: str, amount: int):
