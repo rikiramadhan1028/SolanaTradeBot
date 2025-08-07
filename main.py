@@ -166,24 +166,26 @@ def validate_and_clean_private_key(key_data: str) -> str:
     if key_data.startswith('['):
         try:
             # Pastikan JSON valid
-            json.loads(key_data)
-            return key_data
+            parsed = json.loads(key_data)
+            if not isinstance(parsed, list):
+                raise ValueError("JSON must be a list of integers")
+            if len(parsed) != 64:
+                raise ValueError("Private key must be 64 bytes")
+            return key_data  # Return as JSON string untuk konsistensi
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON format: {e}")
     
     # Jika berupa string Base58
-    elif len(key_data) >= 32:
-        # Cek apakah ini Base58 atau hex
+    else:
         try:
             # Coba parse sebagai Base58 dulu
             import base58
             decoded = base58.b58decode(key_data)
-            if len(decoded) == 64:  # Solana private key biasanya 64 bytes
-                # Konversi ke format JSON array
-                return json.dumps(list(decoded))
-            else:
-                raise ValueError("Invalid private key length")
-        except:
+            if len(decoded) != 64:  # Solana private key harus 64 bytes
+                raise ValueError("Private key must be 64 bytes")
+            # Return as Base58 string untuk konsistensi dengan library solders
+            return key_data
+        except Exception as decode_error:
             # Jika gagal Base58, coba sebagai hex
             try:
                 if key_data.startswith('0x'):
@@ -194,11 +196,11 @@ def validate_and_clean_private_key(key_data: str) -> str:
                 if len(key_bytes) != 64:
                     raise ValueError("Private key must be 64 bytes")
                 
-                return json.dumps(list(key_bytes))
-            except:
-                raise ValueError("Invalid private key format")
-    else:
-        raise ValueError("Private key too short or invalid format")
+                # Convert to Base58 untuk konsistensi
+                import base58
+                return base58.b58encode(key_bytes).decode()
+            except Exception as hex_error:
+                raise ValueError(f"Invalid private key format. Not valid Base58 or Hex: {decode_error}")
 
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -213,33 +215,35 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         if len(args) == 0:
             await update.message.reply_text("❌ Invalid Format Use: `import [private_key]`", parse_mode="Markdown")
             return
-    try:
-        key_data = args[0].strip()
-        
-        # 💡 Deteksi & convert ke base58 jika perlu
-        cleaned_key = wallet_manager.validate_and_clean_private_key(key_data)
-
-        old_wallet = database.get_user_wallet(user_id)
-        already_exists = old_wallet.get("address") is not None
-
-        # 🧪 Ambil pubkey untuk verifikasi validitas
-        pubkey = wallet_manager.get_solana_pubkey_from_base58(cleaned_key)
-
-        # ✅ Simpan base58 private key
-        database.set_user_wallet(user_id, cleaned_key, pubkey)
-
-        msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
-        if already_exists:
-            msg += "\n⚠️ Previous Solana wallet was overwritten."
-        await update.message.reply_text(msg, parse_mode='Markdown')
-
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Error importing Solana wallet: {e}")
-    except Exception as e:
-        print(f"Import error: {e}")  # Debug log
-        await update.message.reply_text(f"❌ An unexpected error occurred during import. Please check your private key format.")
-    return
-    
+        try:
+            key_data = args[0].strip()
+            
+            # Validasi dan bersihkan private key
+            cleaned_key = validate_and_clean_private_key(key_data)
+            
+            old_wallet = database.get_user_wallet(user_id)
+            already_exists = old_wallet.get("address") is not None
+            
+            # Test private key sebelum menyimpan
+            try:
+                pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(cleaned_key)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Invalid private key: {e}")
+                return
+            
+            database.set_user_wallet(user_id, cleaned_key, str(pubkey))
+            
+            msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
+            if already_exists: 
+                msg += "\n⚠️ Previous Solana wallet was overwritten."
+            await update.message.reply_text(msg, parse_mode='Markdown')
+            
+        except ValueError as e:
+            await update.message.reply_text(f"❌ Error importing Solana wallet: {e}")
+        except Exception as e:
+            print(f"Import error: {e}")  # Debug log
+            await update.message.reply_text(f"❌ An unexpected error occurred during import. Please check your private key format.")
+        return
 
     if command == "send":
         try:
@@ -443,12 +447,11 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             await update.message.reply_text(f"⏳ Selling token `{input_mint}` for `{amount}` SOL...")
         
         tx_sig = await solana_client.perform_swap(
-            wallet["private_key"],
-            amount_lamports,
-            input_mint,
-            output_mint
+            sender_private_key_json=wallet["private_key"],
+            amount_lamports=amount_lamports,
+            input_mint=input_mint,
+            output_mint=output_mint
         )
-
 
         if tx_sig.startswith("Error"):
             await update.message.reply_text(f"❌ Swap failed: {tx_sig}")
@@ -470,32 +473,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     
     await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
-
-async def handle_assets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /assets command."""
-    await handle_assets(update, context)
-
-async def handle_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /wallet command."""
-    await handle_wallet_menu(update, context)
-
-async def handle_buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /buy command to start the trading flow."""
-    await buy_sell(update, context)
-
-async def handle_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /send command to send SOL."""
-    await handle_send_asset(update, context)
-
-async def handle_sendtoken_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /sendtoken command to send an SPL token."""
-    await handle_send_asset(update, context)
-
-async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /help command."""
-    # You can customize this help message
-    help_message = "This is the help menu. Use the buttons to navigate, or contact an admin."
-    await update.message.reply_text(help_message)
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:

@@ -27,13 +27,36 @@ class SolanaClient:
             print(f"Error fetching Solana balance for {public_key_str}: {e}")
             return 0.0
 
-    async def perform_swap(self, sender_private_key_base58: str, amount_lamports: int,
+    def _get_keypair_from_private_key(self, private_key_input: str) -> Keypair:
+        """
+        Helper method to create Keypair from various private key formats
+        """
+        try:
+            # Jika input adalah JSON string
+            if private_key_input.strip().startswith('['):
+                key_data = json.loads(private_key_input)
+                if not isinstance(key_data, list):
+                    raise ValueError("JSON private key must be a list of integers.")
+                key_bytes = bytes(key_data)
+                if len(key_bytes) != 64:
+                    raise ValueError("Private key must be 64 bytes.")
+                return Keypair.from_bytes(key_bytes)
+            
+            # Jika input adalah Base58 string
+            else:
+                key_bytes = base58.b58decode(private_key_input)
+                if len(key_bytes) != 64:
+                    raise ValueError("Private key must be 64 bytes.")
+                return Keypair.from_bytes(key_bytes)
+                
+        except Exception as e:
+            raise ValueError(f"Invalid private key format: {e}")
+
+    async def perform_swap(self, sender_private_key_json: str, amount_lamports: int,
                        input_mint: str, output_mint: str) -> str:
         try:
-            # Decode base58 private key and create Keypair
-            key_bytes = base58.b58decode(sender_private_key_base58)
-            keypair = Keypair.from_secret_key(key_bytes)
-
+            # PERBAIKAN: Menggunakan method helper yang benar
+            keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
             # Fetch swap route
@@ -54,12 +77,13 @@ class SolanaClient:
             tx_sig = self.client.send_transaction(tx)
             return str(tx_sig.value)
         except Exception as e:
+            print(f"Swap error details: {e}")  # Debug logging
             return f"Error: {e}"
-
 
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
-            keypair = Keypair.from_json_keypair(private_key_json)
+            # PERBAIKAN: Menggunakan method helper
+            keypair = self._get_keypair_from_private_key(private_key_json)
             return keypair.pubkey()
         except Exception as e:
             print(f"Error converting private key JSON to public key: {e}")
@@ -67,33 +91,36 @@ class SolanaClient:
 
     def send_sol(self, private_key_json: str, to_address: str, amount: float) -> str:
         try:
-            key_data = json.loads(private_key_json)
-            if not isinstance(key_data, list):
-                raise ValueError("Private key must be a list of integers.")
-            sender_keypair = Keypair.from_bytes(bytes(key_data))
+            # PERBAIKAN: Menggunakan method helper yang konsisten
+            sender_keypair = self._get_keypair_from_private_key(private_key_json)
             sender_pubkey = sender_keypair.pubkey()
 
             recipient_pubkey = Pubkey.from_string(to_address)
             lamports = int(amount * 1_000_000_000)
 
+            # Cek balance terlebih dahulu
+            current_balance = self.get_balance(str(sender_pubkey))
+            if current_balance < amount:
+                return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {amount} SOL"
+
             recent_blockhash = self.client.get_latest_blockhash().value.blockhash
             
+            transfer_instruction = transfer(
+                TransferParams(
+                    from_pubkey=sender_pubkey,
+                    to_pubkey=recipient_pubkey,
+                    lamports=lamports
+                )
+            )
+            
             message = Message(
-                instructions=[
-                    transfer(
-                        TransferParams(
-                            from_pubkey=sender_pubkey,
-                            to_pubkey=recipient_pubkey,
-                            lamports=lamports
-                        )
-                    )
-                ],
+                instructions=[transfer_instruction],
                 payer=sender_pubkey
             )
             
-            # PERBAIKAN: Menambahkan `from_keypairs=[sender_keypair]`
-            tx = Transaction(message=message, recent_blockhash=recent_blockhash, from_keypairs=[sender_keypair])
-            # tx.sign([sender_keypair]) -> Baris ini tidak lagi diperlukan karena keypairs sudah disertakan
+            # PERBAIKAN: Menggunakan cara yang benar untuk membuat dan menandatangani transaksi
+            tx = Transaction([transfer_instruction], sender_pubkey, recent_blockhash)
+            tx.sign([sender_keypair])
 
             result = self.client.send_transaction(tx)
             return str(result.value)
@@ -104,10 +131,8 @@ class SolanaClient:
 
     def send_spl_token(self, private_key_json: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
         try:
-            key_data = json.loads(private_key_json)
-            if not isinstance(key_data, list):
-                raise ValueError("Private key must be a list of integers.")
-            sender_keypair = Keypair.from_bytes(bytes(key_data))
+            # PERBAIKAN: Menggunakan method helper yang konsisten
+            sender_keypair = self._get_keypair_from_private_key(private_key_json)
             sender_pubkey = sender_keypair.pubkey()
 
             mint = Pubkey.from_string(token_mint_address)
@@ -118,24 +143,23 @@ class SolanaClient:
 
             recent_blockhash = self.client.get_latest_blockhash().value.blockhash
             
-            message = Message(
-                instructions=[
-                    transfer_checked(
-                        program_id=TOKEN_PROGRAM_ID,
-                        source=sender_token_account,
-                        mint=mint,
-                        dest=recipient_token_account,
-                        owner=sender_pubkey,
-                        amount=int(amount * 1_000_000),
-                        decimals=6
-                    )
-                ],
-                payer=sender_pubkey
+            # Asumsi 6 decimals untuk SPL token (bisa disesuaikan)
+            decimals = 6
+            token_amount = int(amount * (10 ** decimals))
+            
+            transfer_instruction = transfer_checked(
+                program_id=TOKEN_PROGRAM_ID,
+                source=sender_token_account,
+                mint=mint,
+                dest=recipient_token_account,
+                owner=sender_pubkey,
+                amount=token_amount,
+                decimals=decimals
             )
             
-            # PERBAIKAN: Menambahkan `from_keypairs=[sender_keypair]`
-            tx = Transaction(message=message, recent_blockhash=recent_blockhash, from_keypairs=[sender_keypair])
-            # tx.sign([sender_keypair]) -> Baris ini tidak lagi diperlukan
+            # PERBAIKAN: Menggunakan cara yang benar
+            tx = Transaction([transfer_instruction], sender_pubkey, recent_blockhash)
+            tx.sign([sender_keypair])
 
             result = self.client.send_transaction(tx)
             return str(result.value)
@@ -148,27 +172,31 @@ class SolanaClient:
         try:
             owner = Pubkey.from_string(wallet_address)
             opts = TokenAccountOpts(
-            program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-            encoding="jsonParsed"
+                program_id=Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+                encoding="jsonParsed"
             )
 
             response = self.client.get_token_accounts_by_owner(owner, opts)
             results = []
 
             for token_info in response.value:
-                data = token_info['account']['data']['parsed']['info']
-                token_amount = data['tokenAmount']
-                mint = data['mint']
-                amount_raw = int(token_amount['amount'])
-                decimals = int(token_amount['decimals'])
-                ui_amount = amount_raw / (10 ** decimals)
+                try:
+                    data = token_info['account']['data']['parsed']['info']
+                    token_amount = data['tokenAmount']
+                    mint = data['mint']
+                    amount_raw = int(token_amount['amount'])
+                    decimals = int(token_amount['decimals'])
+                    ui_amount = amount_raw / (10 ** decimals)
 
-                if ui_amount > 0:
-                    results.append({
-                        'mint': mint,
-                        'amount': ui_amount,
-                        'decimals': decimals
-                    })
+                    if ui_amount > 0:
+                        results.append({
+                            'mint': mint,
+                            'amount': ui_amount,
+                            'decimals': decimals
+                        })
+                except Exception as parse_error:
+                    print(f"Error parsing token account: {parse_error}")
+                    continue
 
             return results
 
