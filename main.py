@@ -27,6 +27,12 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
 # === States untuk ConversationHandler ===
 AWAITING_TRADE_TYPE, AWAITING_TOKEN_ADDRESS, AWAITING_AMOUNT = range(3)
 
+# === Fungsi helper untuk membersihkan context ===
+def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
+    """Membersihkan user data context"""
+    if hasattr(context, 'user_data'):
+        context.user_data.clear()
+
 # === Fungsi-fungsi Bot ===
 def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
@@ -63,12 +69,17 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
     return welcome_text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Reset context setiap kali start dipanggil
+    clear_user_context(context)
+    
     user_id = update.effective_user.id
     user_mention = update.effective_user.mention_html()
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -101,6 +112,8 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     keyboard_buttons = []
@@ -111,6 +124,8 @@ async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text("Wallet Options:", reply_markup=InlineKeyboardMarkup(keyboard_buttons))
 
 async def handle_create_wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -125,6 +140,8 @@ async def handle_create_wallet_callback(update: Update, context: ContextTypes.DE
     )
 
 async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     await query.message.reply_text(
@@ -139,11 +156,58 @@ async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
         ])
     )
 
+def validate_and_clean_private_key(key_data: str) -> str:
+    """
+    Validasi dan bersihkan private key dari format yang berbeda
+    """
+    key_data = key_data.strip()
+    
+    # Jika dimulai dengan '[' berarti JSON array
+    if key_data.startswith('['):
+        try:
+            # Pastikan JSON valid
+            json.loads(key_data)
+            return key_data
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON format: {e}")
+    
+    # Jika berupa string Base58
+    elif len(key_data) >= 32:
+        # Cek apakah ini Base58 atau hex
+        try:
+            # Coba parse sebagai Base58 dulu
+            import base58
+            decoded = base58.b58decode(key_data)
+            if len(decoded) == 64:  # Solana private key biasanya 64 bytes
+                # Konversi ke format JSON array
+                return json.dumps(list(decoded))
+            else:
+                raise ValueError("Invalid private key length")
+        except:
+            # Jika gagal Base58, coba sebagai hex
+            try:
+                if key_data.startswith('0x'):
+                    key_data = key_data[2:]
+                
+                # Convert hex to bytes array
+                key_bytes = bytes.fromhex(key_data)
+                if len(key_bytes) != 64:
+                    raise ValueError("Private key must be 64 bytes")
+                
+                return json.dumps(list(key_bytes))
+            except:
+                raise ValueError("Invalid private key format")
+    else:
+        raise ValueError("Private key too short or invalid format")
+
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip().replace('\n', ' ')
     command, *args = text.split(maxsplit=1)
     command = command.lower()
+
+    # Reset context untuk setiap command baru
+    clear_user_context(context)
 
     if command == "import":
         if len(args) == 0:
@@ -151,26 +215,40 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         try:
             key_data = args[0].strip()
+            
+            # Validasi dan bersihkan private key
+            cleaned_key = validate_and_clean_private_key(key_data)
+            
             old_wallet = database.get_user_wallet(user_id)
             already_exists = old_wallet.get("address") is not None
             
-            pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(key_data)
-            database.set_user_wallet(user_id, key_data, str(pubkey))
+            # Test private key sebelum menyimpan
+            try:
+                pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(cleaned_key)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Invalid private key: {e}")
+                return
+            
+            database.set_user_wallet(user_id, cleaned_key, str(pubkey))
             
             msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
-            if already_exists: msg += "\n⚠️ Previous Solana wallet was overwritten."
+            if already_exists: 
+                msg += "\n⚠️ Previous Solana wallet was overwritten."
             await update.message.reply_text(msg, parse_mode='Markdown')
             
-        except IndexError:
-            await update.message.reply_text("❌ Invalid format. Use `import [private_key]`")
         except ValueError as e:
             await update.message.reply_text(f"❌ Error importing Solana wallet: {e}")
         except Exception as e:
-            await update.message.reply_text(f"❌ An unexpected error occurred: {e}")
+            print(f"Import error: {e}")  # Debug log
+            await update.message.reply_text(f"❌ An unexpected error occurred during import. Please check your private key format.")
         return
 
     if command == "send":
         try:
+            if len(args) == 0:
+                await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
+                return
+                
             match = re.match(r'^(\w+)\s+([\d.]+)$', args[0].strip())
             if not match:
                 await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
@@ -178,6 +256,10 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
 
             to_addr, amount_str = match.groups()
             amount = float(amount_str)
+
+            if amount <= 0:
+                await update.message.reply_text("❌ Amount must be greater than 0")
+                return
 
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
@@ -189,18 +271,31 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown')
             else:
                 await update.message.reply_text("❌ Failed to send SOL. Please check your balance or recipient address.")
+        except (ValueError, AttributeError) as e:
+            await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
         except Exception as e:
+            print(f"Send error: {e}")  # Debug log
             await update.message.reply_text(f"❌ Error: {e}")
         return
 
-
     if command == "sendtoken":
         try:
-            token_addr, to_addr, amount_str = re.match(r'^(\w+)\s+(\w+)\s+([\d.]+)$', args[0].strip()).groups()
-            if not token_addr or not to_addr or not amount_str:
+            if len(args) == 0:
                 await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
                 return
+                
+            parts = args[0].strip().split()
+            if len(parts) != 3:
+                await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
+                return
+                
+            token_addr, to_addr, amount_str = parts
             amount = float(amount_str)
+            
+            if amount <= 0:
+                await update.message.reply_text("❌ Amount must be greater than 0")
+                return
+                
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
                 await update.message.reply_text("❌ No Solana wallet found.")
@@ -214,12 +309,15 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         except (ValueError, IndexError):
             await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
         except Exception as e:
+            print(f"SendToken error: {e}")  # Debug log
             await update.message.reply_text(f"❌ Error: {e}")
         return
 
     await update.message.reply_text("❌ Unrecognized command. Please use `import`, `send`, or `sendtoken`.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -228,12 +326,16 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode='HTML')
 
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")]]
     await query.edit_message_text(f"🛠️ Feature `{query.data}` is under development.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -243,6 +345,8 @@ async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
@@ -258,11 +362,14 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    clear_user_context(context)  # Reset context
     await update.message.reply_text("Trade has been cancelled.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
 
 # === Fungsi untuk Alur Percakapan Trading ===
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    clear_user_context(context)  # Reset context
+    
     query = update.callback_query
     await query.answer()
     keyboard = [
@@ -290,6 +397,12 @@ async def handle_trade_type(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def handle_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     token_address = update.message.text.strip()
+    
+    # Validasi token address (basic validation)
+    if len(token_address) < 32 or len(token_address) > 44:
+        await update.message.reply_text("❌ Invalid token address format. Please enter a valid Solana token address.")
+        return AWAITING_TOKEN_ADDRESS
+    
     context.user_data['token_address'] = token_address
     
     keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
@@ -313,6 +426,10 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     
     try:
         amount = float(update.message.text.strip())
+        if amount <= 0:
+            await update.message.reply_text("❌ Amount must be greater than 0.")
+            return AWAITING_AMOUNT
+            
         trade_type = context.user_data.get('trade_type')
         token_address = context.user_data.get('token_address')
 
@@ -344,8 +461,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             
     except (ValueError, IndexError):
         await update.message.reply_text("❌ Invalid amount. Please enter a valid number.")
+        return AWAITING_AMOUNT
     except Exception as e:
+        print(f"Swap error: {e}")  # Debug log
         await update.message.reply_text(f"❌ An unexpected error occurred: {e}")
+    
+    # Clear context setelah selesai
+    clear_user_context(context)
     
     await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
