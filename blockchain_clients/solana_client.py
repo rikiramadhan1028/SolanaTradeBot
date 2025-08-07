@@ -115,15 +115,20 @@ class SolanaClient:
                 )
             )
 
-            # Buat transaksi dengan instruksi, payer, dan blockhash
-            tx = Transaction(
+            # --- Bagian Perbaikan Penting ---
+            # 1. Buat Message dari instruksi dan payer
+            message = Message(
                 instructions=[transfer_instruction],
-                payer=sender_pubkey,
+                payer=sender_pubkey
+            )
+            
+            # 2. Buat Transaction dari Message dan recent_blockhash
+            tx = Transaction(
+                message=message,
                 recent_blockhash=latest_blockhash
             )
             
-            # Tandatangani transaksi menggunakan keypair
-            # Ini adalah cara yang benar dan modern
+            # 3. Tandatangani transaksi menggunakan keypair
             tx.sign([sender_keypair])
 
             # Kirim transaksi
