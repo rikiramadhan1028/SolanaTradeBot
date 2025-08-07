@@ -1,4 +1,7 @@
 # blockchain_clients/solana_client.py
+import json
+import base58
+import asyncio
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -7,9 +10,7 @@ from solders.system_program import TransferParams, transfer
 from solana.rpc.types import TxOpts, TokenAccountOpts
 from spl.token.instructions import transfer_checked, get_associated_token_address
 from spl.token.constants import TOKEN_PROGRAM_ID
-import base58
-import json
-import asyncio
+from solders.message import Message, MessageV0
 from dex_integrations.jupiter_aggregator import get_swap_route, get_swap_transaction
 
 
@@ -70,24 +71,33 @@ class SolanaClient:
             recipient_pubkey = Pubkey.from_string(to_address)
             lamports = int(amount * 1_000_000_000)
 
-            tx = Transaction()
-            tx.add(
-                transfer(
-                    TransferParams(
-                        from_pubkey=sender_pubkey,
-                        to_pubkey=recipient_pubkey,
-                        lamports=lamports
+            recent_blockhash = self.client.get_latest_blockhash().value.blockhash
+            
+            # Membangun objek Message dengan instruksi transfer
+            message = Message(
+                instructions=[
+                    transfer(
+                        TransferParams(
+                            from_pubkey=sender_pubkey,
+                            to_pubkey=recipient_pubkey,
+                            lamports=lamports
+                        )
                     )
-                )
+                ],
+                payer=sender_pubkey,
+                recent_blockhash=recent_blockhash
             )
-            result = self.client.send_transaction(tx, sender_keypair, opts=TxOpts(skip_preflight=True))
-            if "result" in result and isinstance(result["result"], str):
-                return result["result"]
-            raise Exception(f"Transaction failed: {result}")
+            
+            # Membuat objek Transaction dari Message
+            tx = Transaction(message=message, recent_blockhash=recent_blockhash, fee_payer=sender_pubkey)
+            tx.sign([sender_keypair])
+
+            result = self.client.send_transaction(tx)
+            return str(result.value)
 
         except Exception as e:
             print(f"Error sending SOL: {e}")
-            raise e
+            return f"Error: {e}"
 
     def send_spl_token(self, private_key_json: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
         try:
@@ -103,27 +113,35 @@ class SolanaClient:
             sender_token_account = get_associated_token_address(sender_pubkey, mint)
             recipient_token_account = get_associated_token_address(recipient, mint)
 
-            tx = Transaction()
-            tx.add(
-                transfer_checked(
-                    program_id=TOKEN_PROGRAM_ID,
-                    source=sender_token_account,
-                    mint=mint,
-                    dest=recipient_token_account,
-                    owner=sender_pubkey,
-                    amount=int(amount * 1_000_000),
-                    decimals=6
-                )
+            recent_blockhash = self.client.get_latest_blockhash().value.blockhash
+            
+            # Membangun objek Message dengan instruksi transfer
+            message = Message(
+                instructions=[
+                    transfer_checked(
+                        program_id=TOKEN_PROGRAM_ID,
+                        source=sender_token_account,
+                        mint=mint,
+                        dest=recipient_token_account,
+                        owner=sender_pubkey,
+                        amount=int(amount * 1_000_000),
+                        decimals=6
+                    )
+                ],
+                payer=sender_pubkey,
+                recent_blockhash=recent_blockhash
             )
+            
+            # Membuat objek Transaction dari Message
+            tx = Transaction(message=message, recent_blockhash=recent_blockhash, fee_payer=sender_pubkey)
+            tx.sign([sender_keypair])
 
-            result = self.client.send_transaction(tx, sender_keypair, opts=TxOpts(skip_preflight=True))
-            if "result" in result and isinstance(result["result"], str):
-                return result["result"]
-            raise Exception(f"SPL Token transaction failed: {result}")
+            result = self.client.send_transaction(tx)
+            return str(result.value)
 
         except Exception as e:
             print(f"Error sending SPL Token: {e}")
-            return None
+            return f"Error: {e}"
         
     def get_spl_token_balances(self, wallet_address: str) -> list:
         try:
