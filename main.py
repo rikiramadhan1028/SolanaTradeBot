@@ -168,8 +168,14 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if command == "send":
         try:
-            to_addr, amount_str = args[0].split()
+            match = re.match(r'^(\w+)\s+([\d.]+)$', args[0].strip())
+            if not match:
+                await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
+                return
+
+            to_addr, amount_str = match.groups()
             amount = float(amount_str)
+
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
                 await update.message.reply_text("❌ No Solana wallet found.")
@@ -179,16 +185,18 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             if tx:
                 await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown')
             else:
-                 await update.message.reply_text("❌ Failed to send SOL. Please check your balance or recipient address.")
-        except (ValueError, IndexError):
-            await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
+                await update.message.reply_text("❌ Failed to send SOL. Please check your balance or recipient address.")
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
         return
-        
+
+
     if command == "sendtoken":
         try:
-            token_addr, to_addr, amount_str = args[0].split()
+            token_addr, to_addr, amount_str = re.match(r'^(\w+)\s+(\w+)\s+([\d.]+)$', args[0].strip()).groups()
+            if not token_addr or not to_addr or not amount_str:
+                await update.message.reply_text("❌ Invalid format. Use `sendtoken [token_address] [to_address] [amount]`")
+                return
             amount = float(amount_str)
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
