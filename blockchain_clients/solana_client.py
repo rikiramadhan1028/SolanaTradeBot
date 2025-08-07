@@ -89,20 +89,22 @@ class SolanaClient:
             print(f"Error converting private key JSON to public key: {e}")
             return None
 
-    def send_sol(self, private_key_base58: str, to_address: str, amount: float) -> str: # Line 63
+    def send_sol(self, private_key_base58: str, to_address: str, amount: float) -> str:
         try:
+            # Menggunakan helper method untuk mendapatkan Keypair
             sender_keypair = self._get_keypair_from_private_key(private_key_base58)
-            sender_pubkey = sender_keypair.pubkey() # Use .pubkey() for consistency
+            sender_pubkey = sender_keypair.pubkey()
 
-            recipient_pubkey = Pubkey.from_string(to_address) # Use Pubkey.from_string
+            recipient_pubkey = Pubkey.from_string(to_address)
             lamports = int(amount * 1_000_000_000)
 
+            # Periksa saldo
             current_balance = self.get_balance(str(sender_pubkey))
             if current_balance < amount:
                 return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {amount} SOL"
 
             # Ambil blockhash
-            latest_blockhash = self.client.get_latest_blockhash().value.blockhash # Access blockhash correctly
+            latest_blockhash = self.client.get_latest_blockhash().value.blockhash
 
             # Buat instruksi transfer
             transfer_instruction = transfer(
@@ -113,15 +115,27 @@ class SolanaClient:
                 )
             )
 
-            # Buat transaksi dan tanda tangan
-            tx = Transaction([transfer_instruction], sender_pubkey, latest_blockhash) # Correct Transaction constructor
-            tx.sign([sender_keypair])
+            # Buat pesan transaksi (cara yang lebih eksplisit)
+            message = Message(
+                instructions=[transfer_instruction],
+                payer=sender_pubkey
+            )
+            
+            # Buat transaksi dari pesan dan blockhash
+            tx = Transaction(
+                message=message,
+                recent_blockhash=latest_blockhash,
+                signatures=[sender_keypair.sign(message.serialize())]
+            )
 
-            result = self.client.send_transaction(tx) # Correct send_transaction call
-            return str(result.value) # Access value correctly
+            # Kirim transaksi
+            result = self.client.send_transaction(tx)
+            return str(result.value)
+            
         except Exception as e:
             print(f"Error sending SOL: {e}")
             return f"Error: {e}"
+
 
     def send_spl_token(self, private_key_base58: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
         try:
