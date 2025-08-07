@@ -142,7 +142,7 @@ async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip().replace('\n', ' ')
-    command, *args = text.split()
+    command, *args = text.split(maxsplit=1)  # Hanya split sekali
     command = command.lower()
     
     if command == "import":
@@ -156,7 +156,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             
             msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
             if already_exists: msg += "\n⚠️ Previous Solana wallet was overwritten."
-            await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+            await update.message.reply_text(msg, parse_mode='Markdown')
             
         except IndexError:
             await update.message.reply_text("❌ Invalid format. Use `import [private_key]`")
@@ -168,7 +168,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if command == "send":
         try:
-            to_addr, amount_str = args
+            to_addr, amount_str = args[0].split()
             amount = float(amount_str)
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
@@ -177,7 +177,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             
             tx = solana_client.send_sol(wallet["private_key"], to_addr, amount)
             if tx:
-                await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+                await update.message.reply_text(f"✅ Sent {amount} SOL!\nTx: `{tx}`", parse_mode='Markdown')
             else:
                  await update.message.reply_text("❌ Failed to send SOL. Please check your balance or recipient address.")
         except (ValueError, IndexError):
@@ -188,7 +188,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         
     if command == "sendtoken":
         try:
-            token_addr, to_addr, amount_str = args
+            token_addr, to_addr, amount_str = args[0].split()
             amount = float(amount_str)
             wallet = database.get_user_wallet(user_id)
             if not wallet or not wallet["private_key"]:
@@ -197,7 +197,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             
             tx = solana_client.send_spl_token(wallet["private_key"], token_addr, to_addr, amount)
             if tx:
-                await update.message.reply_text(f"✅ Sent {amount} SPL Token!\nTx: `{tx}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+                await update.message.reply_text(f"✅ Sent {amount} SPL Token!\nTx: `{tx}`", parse_mode='Markdown')
             else:
                 await update.message.reply_text("❌ Failed to send SPL token.")
         except (ValueError, IndexError):
