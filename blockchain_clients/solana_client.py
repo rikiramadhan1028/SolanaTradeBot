@@ -90,77 +90,70 @@ class SolanaClient:
             return None
 
     def send_sol(self, private_key_base58: str, to_address: str, amount: float) -> str:
-    try:
         # Menggunakan helper method untuk mendapatkan Keypair
-        sender_keypair = self._get_keypair_from_private_key(private_key_base58)
-        sender_pubkey = sender_keypair.pubkey()
-
-        # Validasi alamat penerima
         try:
-            recipient_pubkey = Pubkey.from_string(to_address)
-        except ValueError:
-            return "Error: Invalid recipient address format"
+            sender_keypair = self._get_keypair_from_private_key(private_key_base58)
+            sender_pubkey = sender_keypair.pubkey()
 
-        # Konversi amount ke lamports
-        lamports = int(amount * 1_000_000_000)
-        
-        # Estimasi fee (biasanya ~5000 lamports untuk transfer sederhana)
-        estimated_fee_lamports = 5000
-        estimated_fee_sol = estimated_fee_lamports / 1_000_000_000
+            # Validasi alamat penerima
+            try:
+                recipient_pubkey = Pubkey.from_string(to_address)
+            except ValueError:
+                return "Error: Invalid recipient address format"
 
-        # Periksa saldo dengan mempertimbangkan fee
-        current_balance = self.get_balance(str(sender_pubkey))
-        total_needed = amount + estimated_fee_sol
-        
-        if current_balance < total_needed:
-            return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {total_needed} SOL (including ~{estimated_fee_sol} SOL fee)"
-
-        # Ambil blockhash terbaru
-        latest_blockhash_resp = self.client.get_latest_blockhash()
-        if not latest_blockhash_resp.value:
-            return "Error: Failed to get latest blockhash"
-        
-        latest_blockhash = latest_blockhash_resp.value.blockhash
-
-        # Buat instruksi transfer
-        transfer_instruction = transfer(
-            TransferParams(
-                from_pubkey=sender_pubkey,
-                to_pubkey=recipient_pubkey,
-                lamports=lamports
-            )
-        )
-
-        # Buat dan setup transaksi
-        tx = Transaction(recent_blockhash=latest_blockhash)
-        tx.add(transfer_instruction)
-        
-        # Sign transaksi
-        tx.sign(sender_keypair)
-        
-        # Kirim transaksi dengan confirmasi
-        result = self.client.send_transaction(
-            tx, 
-            opts=TxOpts(
-                skip_confirmation=False,
-                preflight_commitment=Confirmed
-            )
-        )
-        
-        if result.value:
-            return f"Transaction successful! Signature: {result.value}"
-        else:
-            return "Error: Transaction failed to process"
+            # Konversi amount ke lamports
+            lamports = int(amount * 1_000_000_000)
             
-    except InsufficientFundsError:
-        return "Error: Insufficient funds for this transaction"
-    except ValueError as ve:
-        return f"Error: Invalid input - {str(ve)}"
-    except RPCException as rpc_e:
-        return f"Error: RPC connection issue - {str(rpc_e)}"
-    except Exception as e:
-        print(f"Unexpected error sending SOL: {e}")
-        return f"Error: {str(e)}"
+            # Estimasi fee (biasanya ~5000 lamports untuk transfer sederhana)
+            estimated_fee_lamports = 5000
+            estimated_fee_sol = estimated_fee_lamports / 1_000_000_000
+
+            # Periksa saldo dengan mempertimbangkan fee
+            current_balance = self.get_balance(str(sender_pubkey))
+            total_needed = amount + estimated_fee_sol
+            
+            if current_balance < total_needed:
+                return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {total_needed} SOL (including ~{estimated_fee_sol} SOL fee)"
+
+            # Ambil blockhash terbaru
+            latest_blockhash_resp = self.client.get_latest_blockhash()
+            if not latest_blockhash_resp.value:
+                return "Error: Failed to get latest blockhash"
+            
+            latest_blockhash = latest_blockhash_resp.value.blockhash
+
+            # Buat instruksi transfer
+            transfer_instruction = transfer(
+                TransferParams(
+                    from_pubkey=sender_pubkey,
+                    to_pubkey=recipient_pubkey,
+                    lamports=lamports
+                )
+            )
+
+            # Buat dan setup transaksi
+            tx = Transaction(recent_blockhash=latest_blockhash)
+            tx.add(transfer_instruction)
+            
+            # Sign transaksi
+            tx.sign(sender_keypair)
+            
+            # Kirim transaksi dengan confirmasi
+            result = self.client.send_transaction(
+                tx, 
+                opts=TxOpts(
+                    skip_preflight=False,
+                    preflight_commitment=TransactionConfirmationStatus.Confirmed
+                )
+            )
+            
+            if result.value:
+                return f"Transaction successful! Signature: {result.value}"
+            else:
+                return "Error: Transaction failed to process"
+        except Exception as e:
+            print(f"Error sending SOL: {e}")
+            return f"Error: {e}"
 
 
 
