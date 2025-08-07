@@ -117,8 +117,8 @@ class SolanaClient:
             result = self.client.send_transaction(
                 tx,
                 opts=TxOpts(
-                    skip_preflight=False,
-                    preflight_commitment=TransactionConfirmationStatus.Confirmed
+                skip_preflight=False,
+                preflight_commitment="confirmed"
                 )
             )
 
