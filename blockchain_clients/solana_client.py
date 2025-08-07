@@ -116,21 +116,16 @@ class SolanaClient:
             )
 
             # --- Bagian Perbaikan Penting ---
-            # 1. Buat Message dari instruksi dan payer
-            message = Message(
-                instructions=[transfer_instruction],
-                payer=sender_pubkey
-            )
-            
-            # 2. Buat Transaction dari Message dan recent_blockhash
+            # Pola ini meneruskan instruksi, payer, dan blockhash
+            # langsung ke konstruktor Transaction.
+            # Ini cocok dengan error "missing 1 required positional argument: 'from_keypairs'"
+            # yang mungkin dikombinasikan dengan argumen posisional.
             tx = Transaction(
-                message=message,
-                recent_blockhash=latest_blockhash
+                [transfer_instruction], 
+                [sender_keypair], 
+                latest_blockhash
             )
             
-            # 3. Tandatangani transaksi menggunakan keypair
-            tx.sign([sender_keypair])
-
             # Kirim transaksi
             result = self.client.send_transaction(tx)
             return str(result.value)
