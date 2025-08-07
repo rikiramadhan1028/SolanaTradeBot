@@ -89,22 +89,22 @@ class SolanaClient:
             print(f"Error converting private key JSON to public key: {e}")
             return None
 
-    def send_sol(self, private_key_json: str, to_address: str, amount: float) -> str:
+    def send_sol(self, private_key_base58: str, to_address: str, amount: float) -> str: # Line 63
         try:
-            # PERBAIKAN: Menggunakan method helper yang konsisten
-            sender_keypair = self._get_keypair_from_private_key(private_key_json)
-            sender_pubkey = sender_keypair.pubkey()
+            sender_keypair = self._get_keypair_from_private_key(private_key_base58)
+            sender_pubkey = sender_keypair.pubkey() # Use .pubkey() for consistency
 
-            recipient_pubkey = Pubkey.from_string(to_address)
+            recipient_pubkey = Pubkey.from_string(to_address) # Use Pubkey.from_string
             lamports = int(amount * 1_000_000_000)
 
-            # Cek balance terlebih dahulu
             current_balance = self.get_balance(str(sender_pubkey))
             if current_balance < amount:
                 return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {amount} SOL"
 
-            recent_blockhash = self.client.get_latest_blockhash().value.blockhash
-            
+            # Ambil blockhash
+            latest_blockhash = self.client.get_latest_blockhash().value.blockhash # Access blockhash correctly
+
+            # Buat instruksi transfer
             transfer_instruction = transfer(
                 TransferParams(
                     from_pubkey=sender_pubkey,
@@ -112,27 +112,20 @@ class SolanaClient:
                     lamports=lamports
                 )
             )
-            
-            message = Message(
-                instructions=[transfer_instruction],
-                payer=sender_pubkey
-            )
-            
-            # PERBAIKAN: Menggunakan cara yang benar untuk membuat dan menandatangani transaksi
-            tx = Transaction([transfer_instruction], sender_pubkey, recent_blockhash)
+
+            # Buat transaksi dan tanda tangan
+            tx = Transaction([transfer_instruction], sender_pubkey, latest_blockhash) # Correct Transaction constructor
             tx.sign([sender_keypair])
 
-            result = self.client.send_transaction(tx)
-            return str(result.value)
-
+            result = self.client.send_transaction(tx) # Correct send_transaction call
+            return str(result.value) # Access value correctly
         except Exception as e:
             print(f"Error sending SOL: {e}")
             return f"Error: {e}"
 
-    def send_spl_token(self, private_key_json: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
+    def send_spl_token(self, private_key_base58: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
         try:
-            # PERBAIKAN: Menggunakan method helper yang konsisten
-            sender_keypair = self._get_keypair_from_private_key(private_key_json)
+            sender_keypair = self._get_keypair_from_private_key(private_key_base58)
             sender_pubkey = sender_keypair.pubkey()
 
             mint = Pubkey.from_string(token_mint_address)
@@ -141,12 +134,12 @@ class SolanaClient:
             sender_token_account = get_associated_token_address(sender_pubkey, mint)
             recipient_token_account = get_associated_token_address(recipient, mint)
 
-            recent_blockhash = self.client.get_latest_blockhash().value.blockhash
-            
-            # Asumsi 6 decimals untuk SPL token (bisa disesuaikan)
-            decimals = 6
+            # Ambil blockhash
+            latest_blockhash = self.client.get_latest_blockhash().value.blockhash
+
+            decimals = 6  # Sesuaikan jika tokenmu pakai decimals lain
             token_amount = int(amount * (10 ** decimals))
-            
+
             transfer_instruction = transfer_checked(
                 program_id=TOKEN_PROGRAM_ID,
                 source=sender_token_account,
@@ -156,18 +149,16 @@ class SolanaClient:
                 amount=token_amount,
                 decimals=decimals
             )
-            
-            # PERBAIKAN: Menggunakan cara yang benar
-            tx = Transaction([transfer_instruction], sender_pubkey, recent_blockhash)
+
+            tx = Transaction([transfer_instruction], sender_pubkey, latest_blockhash)
             tx.sign([sender_keypair])
 
-            result = self.client.send_transaction(tx)
+            result = self.client.send_transaction(tx, opts=TxOpts(skip_preflight=True))
             return str(result.value)
-
         except Exception as e:
             print(f"Error sending SPL Token: {e}")
             return f"Error: {e}"
-        
+            
     def get_spl_token_balances(self, wallet_address: str) -> list:
         try:
             owner = Pubkey.from_string(wallet_address)
