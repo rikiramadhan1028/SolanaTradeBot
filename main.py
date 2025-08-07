@@ -472,6 +472,32 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
 
+async def handle_assets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /assets command."""
+    await handle_assets(update, context)
+
+async def handle_wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /wallet command."""
+    await handle_wallet_menu(update, context)
+
+async def handle_buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /buy command to start the trading flow."""
+    await buy_sell(update, context)
+
+async def handle_send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /send command to send SOL."""
+    await handle_send_asset(update, context)
+
+async def handle_sendtoken_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /sendtoken command to send an SPL token."""
+    await handle_send_asset(update, context)
+
+async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /help command."""
+    # You can customize this help message
+    help_message = "This is the help menu. Use the buttons to navigate, or contact an admin."
+    await update.message.reply_text(help_message)
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
