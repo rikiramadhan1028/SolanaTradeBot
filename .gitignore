@@ -1,0 +1,48 @@
+# ⛔ Python cache & bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# ⛔ Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+.idea/
+.vscode/
+
+# ⛔ OS files
+.DS_Store
+Thumbs.db
+
+# ⛔ Environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# ⛔ Logs & output
+*.log
+bot_data.db # File database SQLite lokal
+
+# ⛔ Test / coverage
+coverage/
+.tox/
+.nox/
+.pytest_cache/
+*.cover
+
+# ⛔ Jupyter notebooks checkpoints
+.ipynb_checkpoints
+
+# ✅ Include requirements
+!requirements.txt
+
+# ✅ Include config example (opsional)
+!.env.example
+
+# ✅ If using vercel.json or runtime.txt
+!vercel.json
+!runtime.txt

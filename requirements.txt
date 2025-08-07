@@ -1,0 +1,7 @@
+python-telegram-bot
+solana
+requests
+python-dotenv
+httpx
+solders
+base58
