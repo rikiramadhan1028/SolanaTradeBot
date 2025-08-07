@@ -6,8 +6,9 @@ import base58
 
 def create_solana_wallet():
     keypair = Keypair()
-    # Mengembalikan private key dalam format Base58 string
-    private_key_base58 = keypair.to_base58_string()
+    private_key_bytes = keypair.to_bytes()
+    # Perbaikan: Menggunakan base58.b58encode untuk mendapatkan string Base58
+    private_key_base58 = base58.b58encode(private_key_bytes).decode('utf-8')
     public_key = keypair.pubkey()
     return private_key_base58, str(public_key)
 
