@@ -13,7 +13,6 @@ from spl.token.constants import TOKEN_PROGRAM_ID
 from solders.message import Message, MessageV0
 from dex_integrations.jupiter_aggregator import get_swap_route, get_swap_transaction
 
-
 class SolanaClient:
     def __init__(self, rpc_url: str):
         self.client = Client(rpc_url)
@@ -47,10 +46,10 @@ class SolanaClient:
             
             tx_sig = self.client.send_transaction(tx)
             
-            return f"Swap successful! Transaction signature: {tx_sig.value}"
+            return str(tx_sig.value)
 
         except Exception as e:
-            return f"Error sending transaction: {e}"
+            return f"Error: {e}"
 
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
@@ -73,7 +72,6 @@ class SolanaClient:
 
             recent_blockhash = self.client.get_latest_blockhash().value.blockhash
             
-            # Membangun objek Message dengan instruksi transfer
             message = Message(
                 instructions=[
                     transfer(
@@ -84,12 +82,10 @@ class SolanaClient:
                         )
                     )
                 ],
-                payer=sender_pubkey,
-                recent_blockhash=recent_blockhash
+                payer=sender_pubkey
             )
             
-            # Perbaikan: Buat objek Transaction hanya dengan message
-            tx = Transaction(message=message, fee_payer=sender_pubkey)
+            tx = Transaction(message=message, recent_blockhash=recent_blockhash)
             tx.sign([sender_keypair])
 
             result = self.client.send_transaction(tx)
@@ -115,7 +111,6 @@ class SolanaClient:
 
             recent_blockhash = self.client.get_latest_blockhash().value.blockhash
             
-            # Membangun objek Message dengan instruksi transfer
             message = Message(
                 instructions=[
                     transfer_checked(
@@ -128,12 +123,10 @@ class SolanaClient:
                         decimals=6
                     )
                 ],
-                payer=sender_pubkey,
-                recent_blockhash=recent_blockhash
+                payer=sender_pubkey
             )
             
-            # Perbaikan: Buat objek Transaction hanya dengan message
-            tx = Transaction(message=message, fee_payer=sender_pubkey)
+            tx = Transaction(message=message, recent_blockhash=recent_blockhash)
             tx.sign([sender_keypair])
 
             result = self.client.send_transaction(tx)
