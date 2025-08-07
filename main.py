@@ -6,19 +6,28 @@ import database
 import wallet_manager
 from blockchain_clients.solana_client import SolanaClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ConversationHandler
+)
 from dotenv import load_dotenv
-import re
 import asyncio
 
+# === Konfigurasi & Inisialisasi ===
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
+SOLANA_NATIVE_TOKEN_MINT = "So11111111111111111111111111111111111111112"
 solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
-def get_current_multichain_status() -> bool:
-    return database.get_setting("MULTICHAIN_ENABLED") == "True"
+# === States untuk ConversationHandler ===
+AWAITING_TRADE_TYPE, AWAITING_TOKEN_ADDRESS, AWAITING_AMOUNT = range(3)
 
+# === Fungsi-fungsi Bot ===
 def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("⚡ Import Wallet", callback_data="import_wallet"),
@@ -38,15 +47,12 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
     wallet_info = database.get_user_wallet(user_id)
     solana_address = wallet_info.get("address", "--")
     sol_balance_str = "--"
-
     if solana_address != "--":
         try:
             sol_balance = solana_client.get_balance(solana_address)
             sol_balance_str = f"{sol_balance:.4f} SOL"
-        except Exception as e:
+        except Exception:
             sol_balance_str = "Error"
-            print(f"Error fetching Solana balance for user {user_id}: {e}")
-
     welcome_text = (
         f"👋 Hello {user_mention}! Welcome to <b>TradeBeat Bot</b>\n\n"
         f"Wallet address: <code>{solana_address}</code>\n"
@@ -62,40 +68,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    is_enabled = get_current_multichain_status()
-    status_text = "ENABLED" if is_enabled else "DISABLED"
-    keyboard = [
-        [InlineKeyboardButton(f"Multichain: {status_text}", callback_data=f"toggle_multichain:{'disable' if is_enabled else 'enable'}")],
-        [InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")]
-    ]
-    await query.edit_message_text("Bot Settings:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def toggle_multichain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    admin_user_id = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
-    if query.from_user.id != admin_user_id:
-        await query.edit_message_text("You do not have permission to do this.")
-        return
-    action = query.data.split(":")[1]
-    new_status = "True" if action == "enable" else "False"
-    database.set_setting("MULTICHAIN_ENABLED", new_status)
-    status_text = "ENABLED" if new_status == "True" else "DISABLED"
-    keyboard = [
-        [InlineKeyboardButton(f"Multichain: {status_text}", callback_data=f"toggle_multichain:{'disable' if new_status == 'True' else 'enable'}")],
-        [InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")]
-    ]
-    await query.edit_message_text(f"Multichain system has been {status_text.lower()}.\nBot Settings:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def handle_buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    keyboard = [[InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")]]
-    await query.edit_message_text("Please enter the token contract address to start trading.", reply_markup=InlineKeyboardMarkup(keyboard))
-
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -110,10 +82,8 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             sol_balance = "Error"
             print(f"[Solana Balance Error] {e}")
-
     msg = f"📊 <b>Your Asset Balances</b>\n\n"
     msg += f"Solana: <code>{solana_address or '--'}</code>\n➡️ {sol_balance}\n"
-    
     keyboard = [
         [InlineKeyboardButton("🔁 Withdraw/Send", callback_data="send_asset")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
@@ -124,12 +94,10 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             spl_tokens = solana_client.get_spl_token_balances(solana_address)
     except Exception as e:
         print(f"[SPL Token Balance Error] {e}")
-
     if spl_tokens:
         msg += "\n\n🔹 <b>SPL Tokens</b>\n"
         for token in spl_tokens:
             msg += f"{token['amount']:.4f} (mint: {token['mint'][:6]}...)\n"
-
     await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -174,13 +142,6 @@ async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip().replace('\n', ' ')
-    
-    if text.lower() == "cancel":
-        user_mention = update.effective_user.mention_html()
-        welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
-        await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
-        return
-
     command, *args = text.split()
     command = command.lower()
     
@@ -245,9 +206,8 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ Error: {e}")
         return
 
-    # Fallback for unrecognized text commands
     await update.message.reply_text("❌ Unrecognized command. Please use `import`, `send`, or `sendtoken`.")
-    
+
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -285,28 +245,123 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+# === Fungsi untuk Alur Percakapan Trading ===
+async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton("Buy with SOL", callback_data="trade_buy")],
+        [InlineKeyboardButton("Sell to SOL", callback_data="trade_sell")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
+    ]
+    await query.edit_message_text("💰 Choose your trading action:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return AWAITING_TRADE_TYPE
+
+async def handle_trade_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    trade_type = query.data.split('_')[1]
+    context.user_data['trade_type'] = trade_type
+    
+    if trade_type == "buy":
+        await query.edit_message_text("📄 Please send the **token contract address** you want to buy.")
+    else: # sell
+        await query.edit_message_text("📄 Please send the **token contract address** you want to sell.")
+    
+    return AWAITING_TOKEN_ADDRESS
+
+async def handle_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    token_address = update.message.text.strip()
+    context.user_data['token_address'] = token_address
+    
+    trade_type = context.user_data.get('trade_type')
+    if trade_type == "buy":
+        await update.message.reply_text(f"💰 You chose to **buy** `{token_address}`.\n\n"
+                                        f"Please send the amount of **SOL** you want to use.")
+    else: # sell
+        await update.message.reply_text(f"💰 You chose to **sell** `{token_address}`.\n\n"
+                                        f"Please send the amount of **tokens** you want to sell.")
+        
+    return AWAITING_AMOUNT
+
+async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    wallet = database.get_user_wallet(user_id)
+    if not wallet or not wallet["private_key"]:
+        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.")
+        return ConversationHandler.END
+    
+    try:
+        amount = float(update.message.text.strip())
+        trade_type = context.user_data.get('trade_type')
+        token_address = context.user_data.get('token_address')
+
+        if trade_type == "buy":
+            input_mint = SOLANA_NATIVE_TOKEN_MINT
+            output_mint = token_address
+            amount_lamports = int(amount * 1_000_000_000)
+            await update.message.reply_text(f"⏳ Buying token `{output_mint}` with `{amount}` SOL...")
+        else: # sell
+            input_mint = token_address
+            output_mint = SOLANA_NATIVE_TOKEN_MINT
+            amount_lamports = int(amount * 1_000_000_000) # Assuming 6 decimals for most SPL tokens
+            await update.message.reply_text(f"⏳ Selling token `{input_mint}` for `{amount}` SOL...")
+        
+        tx_sig = await solana_client.perform_swap(
+            sender_private_key_json=wallet["private_key"],
+            amount_lamports=amount_lamports,
+            input_mint=input_mint,
+            output_mint=output_mint
+        )
+
+        if tx_sig.startswith("Error"):
+            await update.message.reply_text(f"❌ Swap failed: {tx_sig}")
+        else:
+            await update.message.reply_text(
+                f"✅ Swap successful! View transaction: https://explorer.solana.com/tx/{tx_sig}?cluster=devnet",
+                parse_mode='Markdown'
+            )
+            
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Invalid amount. Please enter a valid number.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ An unexpected error occurred: {e}")
+    
+    return ConversationHandler.END
+
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Trade has been cancelled.")
+    return ConversationHandler.END
+    
+# === Main function ===
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
         return
-    if not os.getenv("ADMIN_TELEGRAM_ID"):
-        print("Warning: ADMIN_TELEGRAM_ID not set in .env.")
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # ConversationHandler untuk alur trading
+    trade_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(buy_sell, pattern="buy_sell")],
+        states={
+            AWAITING_TRADE_TYPE: [CallbackQueryHandler(handle_trade_type, pattern=r"trade_.*")],
+            AWAITING_TOKEN_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address)],
+            AWAITING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation), MessageHandler(filters.Regex("^/start$"), start)]
+    )
+
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(settings, pattern="menu_settings"))
-    application.add_handler(CallbackQueryHandler(toggle_multichain, pattern=r"^toggle_multichain:.*"))
-    application.add_handler(CallbackQueryHandler(handle_buy_sell, pattern="buy_sell"))
+    application.add_handler(trade_conv_handler)
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="view_assets"))
     application.add_handler(CallbackQueryHandler(handle_wallet_menu, pattern="menu_wallet"))
     application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*"))
     application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="back_to_main_menu"))
     application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="import_wallet"))
-    application.add_handler(CallbackQueryHandler(dummy_response, pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help)$"))
-    application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:(solana|ethereum)$"))
+    application.add_handler(CallbackQueryHandler(dummy_response, pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$"))
+    application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="send_asset"))
-    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
 
     print("Bot is running...")
