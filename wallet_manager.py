@@ -6,9 +6,10 @@ import base58
 
 def create_solana_wallet():
     keypair = Keypair()
-    private_key_bytes = keypair.to_bytes()
+    # Mengembalikan private key dalam format Base58 string
+    private_key_base58 = keypair.to_base58_string()
     public_key = keypair.pubkey()
-    return json.dumps(list(private_key_bytes)), str(public_key)
+    return private_key_base58, str(public_key)
 
 def get_solana_pubkey_from_private_key_json(private_key_json: str) -> Pubkey:
     try:
