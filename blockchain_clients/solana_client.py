@@ -2,6 +2,7 @@
 import json
 import base58
 import asyncio
+from solders.transaction_status import TransactionConfirmationStatus
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -85,8 +86,9 @@ class SolanaClient:
                 payer=sender_pubkey
             )
             
-            tx = Transaction(message=message, recent_blockhash=recent_blockhash)
-            tx.sign([sender_keypair])
+            # PERBAIKAN: Menambahkan `from_keypairs=[sender_keypair]`
+            tx = Transaction(message=message, recent_blockhash=recent_blockhash, from_keypairs=[sender_keypair])
+            # tx.sign([sender_keypair]) -> Baris ini tidak lagi diperlukan karena keypairs sudah disertakan
 
             result = self.client.send_transaction(tx)
             return str(result.value)
@@ -126,8 +128,9 @@ class SolanaClient:
                 payer=sender_pubkey
             )
             
-            tx = Transaction(message=message, recent_blockhash=recent_blockhash)
-            tx.sign([sender_keypair])
+            # PERBAIKAN: Menambahkan `from_keypairs=[sender_keypair]`
+            tx = Transaction(message=message, recent_blockhash=recent_blockhash, from_keypairs=[sender_keypair])
+            # tx.sign([sender_keypair]) -> Baris ini tidak lagi diperlukan
 
             result = self.client.send_transaction(tx)
             return str(result.value)

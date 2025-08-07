@@ -33,7 +33,7 @@ def get_solana_pubkey_from_private_key_json(private_key_json: str) -> Pubkey:
 
 def create_evm_wallet():
     """Creates a new EVM account and returns its private key (hex) and public address."""
-    account = Account.create()
+    account = account.create()
     return account.key.hex(), account.address
 
 def import_evm_wallet_from_mnemonic(mnemonic: str, index: int = 0):
