@@ -364,8 +364,35 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Menangani pembatalan percakapan.
+    Fungsi ini dipanggil oleh fallback ConversationHandler
+    saat tombol 'Cancel' diklik.
+    """
     clear_user_context(context)  # Reset context
-    await update.message.reply_text("Trade has been cancelled.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+
+    # Periksa apakah update berasal dari callback query (tombol inline)
+    if update.callback_query:
+        query = update.callback_query
+        # Panggil query.answer() untuk menghilangkan status loading pada tombol
+        await query.answer()
+        # Edit pesan yang sudah ada untuk memberitahu pengguna bahwa trade dibatalkan
+        await query.edit_message_text(
+            "Trade has been cancelled.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]
+            )
+        )
+    # Jika update berasal dari pesan (meskipun jarang terjadi di skenario ini),
+    # tetap berikan balasan.
+    elif update.message:
+        await update.message.reply_text(
+            "Trade has been cancelled.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]
+            )
+        )
+
     return ConversationHandler.END
 
 # === Fungsi untuk Alur Percakapan Trading ===

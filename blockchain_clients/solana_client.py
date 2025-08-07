@@ -1,18 +1,19 @@
 # blockchain_clients/solana_client.py
+
 import json
 import base58
-import asyncio
 from solders.transaction_status import TransactionConfirmationStatus
 from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
-from solders.transaction import Transaction, VersionedTransaction
+from solders.transaction import VersionedTransaction
 from solders.system_program import TransferParams, transfer
+from solders.message import MessageV0
 from solana.rpc.types import TxOpts, TokenAccountOpts
 from spl.token.instructions import transfer_checked, get_associated_token_address
 from spl.token.constants import TOKEN_PROGRAM_ID
-from solders.message import Message, MessageV0
 from dex_integrations.jupiter_aggregator import get_swap_route, get_swap_transaction
+
 
 class SolanaClient:
     def __init__(self, rpc_url: str):
@@ -28,11 +29,7 @@ class SolanaClient:
             return 0.0
 
     def _get_keypair_from_private_key(self, private_key_input: str) -> Keypair:
-        """
-        Helper method to create Keypair from various private key formats
-        """
         try:
-            # Jika input adalah JSON string
             if private_key_input.strip().startswith('['):
                 key_data = json.loads(private_key_input)
                 if not isinstance(key_data, list):
@@ -41,48 +38,40 @@ class SolanaClient:
                 if len(key_bytes) != 64:
                     raise ValueError("Private key must be 64 bytes.")
                 return Keypair.from_bytes(key_bytes)
-            
-            # Jika input adalah Base58 string
             else:
                 key_bytes = base58.b58decode(private_key_input)
                 if len(key_bytes) != 64:
                     raise ValueError("Private key must be 64 bytes.")
                 return Keypair.from_bytes(key_bytes)
-                
         except Exception as e:
             raise ValueError(f"Invalid private key format: {e}")
 
     async def perform_swap(self, sender_private_key_json: str, amount_lamports: int,
-                       input_mint: str, output_mint: str) -> str:
+                           input_mint: str, output_mint: str) -> str:
         try:
-            # PERBAIKAN: Menggunakan method helper yang benar
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
-            # Fetch swap route
             route = await get_swap_route(input_mint, output_mint, amount_lamports)
             if not route:
                 return "Error: No swap route found."
 
-            # Build transaction
             swap_transaction = await get_swap_transaction(route, public_key_str)
             if not swap_transaction:
                 return "Error: Could not build swap transaction."
-            
+
             raw_tx = base58.b58decode(swap_transaction)
             tx = VersionedTransaction.deserialize(raw_tx)
             tx.sign([keypair])
-            
-            # Send transaction
+
             tx_sig = self.client.send_transaction(tx)
             return str(tx_sig.value)
         except Exception as e:
-            print(f"Swap error details: {e}")  # Debug logging
+            print(f"Swap error details: {e}")
             return f"Error: {e}"
 
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
-            # PERBAIKAN: Menggunakan method helper
             keypair = self._get_keypair_from_private_key(private_key_json)
             return keypair.pubkey()
         except Exception as e:
@@ -90,39 +79,25 @@ class SolanaClient:
             return None
 
     def send_sol(self, private_key_base58: str, to_address: str, amount: float) -> str:
-        # Menggunakan helper method untuk mendapatkan Keypair
         try:
             sender_keypair = self._get_keypair_from_private_key(private_key_base58)
             sender_pubkey = sender_keypair.pubkey()
 
-            # Validasi alamat penerima
             try:
                 recipient_pubkey = Pubkey.from_string(to_address)
             except ValueError:
                 return "Error: Invalid recipient address format"
 
-            # Konversi amount ke lamports
             lamports = int(amount * 1_000_000_000)
-            
-            # Estimasi fee (biasanya ~5000 lamports untuk transfer sederhana)
-            estimated_fee_lamports = 5000
-            estimated_fee_sol = estimated_fee_lamports / 1_000_000_000
-
-            # Periksa saldo dengan mempertimbangkan fee
+            estimated_fee_sol = 0.000005
             current_balance = self.get_balance(str(sender_pubkey))
             total_needed = amount + estimated_fee_sol
-            
+
             if current_balance < total_needed:
-                return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {total_needed} SOL (including ~{estimated_fee_sol} SOL fee)"
+                return f"Error: Insufficient balance. Current: {current_balance} SOL, Required: {total_needed} SOL"
 
-            # Ambil blockhash terbaru
-            latest_blockhash_resp = self.client.get_latest_blockhash()
-            if not latest_blockhash_resp.value:
-                return "Error: Failed to get latest blockhash"
-            
-            latest_blockhash = latest_blockhash_resp.value.blockhash
+            latest_blockhash = self.client.get_latest_blockhash().value.blockhash
 
-            # Buat instruksi transfer
             transfer_instruction = transfer(
                 TransferParams(
                     from_pubkey=sender_pubkey,
@@ -131,22 +106,22 @@ class SolanaClient:
                 )
             )
 
-            # Buat dan setup transaksi
-            tx = Transaction(recent_blockhash=latest_blockhash)
-            tx.add(transfer_instruction)
-            
-            # Sign transaksi
-            tx.sign(sender_keypair)
-            
-            # Kirim transaksi dengan confirmasi
+            msg = MessageV0.try_compile(
+                payer=sender_pubkey,
+                instructions=[transfer_instruction],
+                recent_blockhash=latest_blockhash,
+                address_lookup_table_accounts=[]
+            )
+            tx = VersionedTransaction(msg, [sender_keypair])
+
             result = self.client.send_transaction(
-                tx, 
+                tx,
                 opts=TxOpts(
                     skip_preflight=False,
                     preflight_commitment=TransactionConfirmationStatus.Confirmed
                 )
             )
-            
+
             if result.value:
                 return f"Transaction successful! Signature: {result.value}"
             else:
@@ -154,9 +129,6 @@ class SolanaClient:
         except Exception as e:
             print(f"Error sending SOL: {e}")
             return f"Error: {e}"
-
-
-
 
     def send_spl_token(self, private_key_base58: str, token_mint_address: str, to_wallet_address: str, amount: float) -> str:
         try:
@@ -169,10 +141,9 @@ class SolanaClient:
             sender_token_account = get_associated_token_address(sender_pubkey, mint)
             recipient_token_account = get_associated_token_address(recipient, mint)
 
-            # Ambil blockhash
             latest_blockhash = self.client.get_latest_blockhash().value.blockhash
 
-            decimals = 6  # Sesuaikan jika tokenmu pakai decimals lain
+            decimals = 6  # Adjust if your token uses different decimals
             token_amount = int(amount * (10 ** decimals))
 
             transfer_instruction = transfer_checked(
@@ -185,15 +156,20 @@ class SolanaClient:
                 decimals=decimals
             )
 
-            tx = Transaction([transfer_instruction], sender_pubkey, latest_blockhash)
-            tx.sign([sender_keypair])
+            msg = MessageV0.try_compile(
+                payer=sender_pubkey,
+                instructions=[transfer_instruction],
+                recent_blockhash=latest_blockhash,
+                address_lookup_table_accounts=[]
+            )
+            tx = VersionedTransaction(msg, [sender_keypair])
 
             result = self.client.send_transaction(tx, opts=TxOpts(skip_preflight=True))
             return str(result.value)
         except Exception as e:
             print(f"Error sending SPL Token: {e}")
             return f"Error: {e}"
-            
+
     def get_spl_token_balances(self, wallet_address: str) -> list:
         try:
             owner = Pubkey.from_string(wallet_address)
@@ -225,7 +201,6 @@ class SolanaClient:
                     continue
 
             return results
-
         except Exception as e:
             print(f"[SPL Token Balance Error] {e}")
             return []
