@@ -88,8 +88,8 @@ class SolanaClient:
                 recent_blockhash=recent_blockhash
             )
             
-            # Membuat objek Transaction dari Message
-            tx = Transaction(message=message, recent_blockhash=recent_blockhash, fee_payer=sender_pubkey)
+            # Perbaikan: Buat objek Transaction hanya dengan message
+            tx = Transaction(message=message, fee_payer=sender_pubkey)
             tx.sign([sender_keypair])
 
             result = self.client.send_transaction(tx)
@@ -132,8 +132,8 @@ class SolanaClient:
                 recent_blockhash=recent_blockhash
             )
             
-            # Membuat objek Transaction dari Message
-            tx = Transaction(message=message, recent_blockhash=recent_blockhash, fee_payer=sender_pubkey)
+            # Perbaikan: Buat objek Transaction hanya dengan message
+            tx = Transaction(message=message, fee_payer=sender_pubkey)
             tx.sign([sender_keypair])
 
             result = self.client.send_transaction(tx)
