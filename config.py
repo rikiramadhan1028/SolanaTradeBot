@@ -1,2 +1,2 @@
 PUMPPAL_API_KEY = "an65ghkhen16wp35axa5mgjn9ht3gnj2f174ge9rd52pyhah8crkawkk6nrq2mkj70np2wuh993qmyk784rp4djq9gt36e32b0r3ge3ne5qmgrhmc53m8xv3e1x3gnk8cn23cg9qewyku61kqgtbca9h46t3c84vkex29dc6h54rv26ex158kk66da5mhku6nv4yxaq65kkuf8"
-SOLANA_RPC_URL = "https://api.devnet.solana.com"
+SOLANA_RPC_URL = "https://api.mainnet.solana.com"
