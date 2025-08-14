@@ -3,13 +3,10 @@ import httpx
 import json
 import base64
 
-RAYDIUM_QUOTE_API_URL = "https://api-v3.raydium.io/swap/route/swap-base-in" # Placeholder
-RAYDIUM_SWAP_API_URL = "https://api-v3.raydium.io/swap/transaction/swap-base-in" # Placeholder
+RAYDIUM_SWAP_API_URL = "https://api-v3.raydium.io/swap/transaction/swap-base-in"
 
 async def get_swap_route(input_mint: str, output_mint: str, amount: int):
     # Logika untuk mendapatkan rute swap dari API Raydium
-    # Placeholder: API Raydium tidak selalu menyediakan "rute" swap seperti Jupiter.
-    # kita akan mencoba mendapatkan transaksi secara langsung.
     return {
         "inputMint": input_mint,
         "outputMint": output_mint,

@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 import re
 import asyncio
 import base64
+from dex_integrations.price_aggregator import get_token_price_from_raydium, get_token_price_from_pumpfun
 
 # === Konfigurasi & Inisialisasi ===
 load_dotenv()
@@ -418,23 +419,29 @@ async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAU
     return AWAITING_TOKEN_ADDRESS
 
 async def handle_token_address_for_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    token_address = update.message.text.strip()
+    message = update.message if update.message else update.callback_query.message
+    token_address = message.text.strip()
     
     if len(token_address) < 32 or len(token_address) > 44:
-        await update.message.reply_text("❌ Invalid token address format. Please enter a valid Solana token address.")
+        await message.reply_text("❌ Invalid token address format. Please enter a valid Solana token address.")
         return AWAITING_TOKEN_ADDRESS
 
     context.user_data['token_address'] = token_address
-    
-    price_info = {
-        "price": 0.000002726,
-        "lp": "76.7K MC",
-        "mc": "272.7K"
-    }
 
+    # Dapatkan harga dari Raydium
+    price_data = await get_token_price_from_raydium(token_address)
+    
+    # Jika Raydium tidak memiliki data, coba dari Pumpfun
+    if price_data['price'] <= 0:
+        price_data = await get_token_price_from_pumpfun(token_address)
+    
+    price_str = f"${price_data['price']:.8f}" if price_data['price'] > 0 else "N/A"
+    market_cap_str = f"${price_data['mc']:.2f}" if price_data['mc'] != "N/A" else "N/A"
+    
     message_text = (
         f"**Token Address:** `{token_address}`\n"
-        f"**Price:** ${price_info['price']:.8f} (LP: {price_info['lp']}, MC: {price_info['mc']})\n\n"
+        f"**Price:** {price_str}\n"
+        f"**Market Cap:** {market_cap_str}\n\n"
         "**Pilih DEX yang ingin digunakan:**"
     )
 
@@ -444,7 +451,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
     ]
 
-    await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    await message.reply_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     return AWAITING_TRADE_ACTION
 
 async def handle_trade_dex_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -527,7 +534,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
-    # Dapatkan objek message yang benar, entah dari update.message atau update.callback_query.message
     message = update.message if update.message else update.callback_query.message
     
     user_id = update.effective_user.id
@@ -602,15 +608,17 @@ async def handle_back_to_dex_selection(update: Update, context: ContextTypes.DEF
     
     token_address = context.user_data.get('token_address')
     
-    price_info = {
-        "price": 0.000002726,
-        "lp": "76.7K MC",
-        "mc": "272.7K"
-    }
+    price_data = await get_token_price_from_raydium(token_address)
+    if price_data['price'] <= 0:
+        price_data = await get_token_price_from_pumpfun(token_address)
+        
+    price_str = f"${price_data['price']:.8f}" if price_data['price'] > 0 else "N/A"
+    market_cap_str = f"${price_data['mc']:.2f}" if price_data['mc'] != "N/A" else "N/A"
 
     message_text = (
         f"**Token Address:** `{token_address}`\n"
-        f"**Price:** ${price_info['price']:.8f} (LP: {price_info['lp']}, MC: {price_info['mc']})\n\n"
+        f"**Price:** {price_str}\n"
+        f"**Market Cap:** {market_cap_str}\n\n"
         "**Pilih DEX yang ingin digunakan:**"
     )
 
