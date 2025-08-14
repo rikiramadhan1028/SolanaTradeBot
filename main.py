@@ -384,21 +384,40 @@ async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DE
 
     return ConversationHandler.END
 
-# === Fungsi untuk Alur Percakapan Trading yang Baru ===
+# === Fungsi-fungsi Alur Percakapan Trading Baru ===
+
+# Fungsi ini menampilkan menu buy/sell awal
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
-    keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
+
+    keyboard = [
+        [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
+        [InlineKeyboardButton("✈️ Copy Trade", callback_data="dummy_copy_trade")],
+        [InlineKeyboardButton("🤖 Auto Trade - Pumpfun", callback_data="dummy_auto_trade")],
+        [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders"), InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell")],
+        [InlineKeyboardButton("📈 Positions", callback_data="dummy_positions"), InlineKeyboardButton("👛 Wallet", callback_data="dummy_wallet"), InlineKeyboardButton("❓ Help", callback_data="dummy_help")],
+        [InlineKeyboardButton("💵 Smart Wallet", callback_data="dummy_smart_wallet"), InlineKeyboardButton("🖥️ Extension", callback_data="dummy_extension")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="dummy_settings"), InlineKeyboardButton("💰 Referrals", callback_data="dummy_referrals")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
+    ]
     
-    await query.edit_message_text(
-        "📄 Please send the **token contract address** you want to trade.",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    message_text = "Enter a token address to buy"
+    
+    await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+
     return AWAITING_TOKEN_ADDRESS
 
+# Fungsi ini akan menangani klik pada tombol-tombol dummy di menu buy/sell awal
+async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer(f"Feature '{query.data}' is under development.", show_alert=True)
+    # Tetap di state yang sama, menunggu input teks
+    return AWAITING_TOKEN_ADDRESS
+
+# Fungsi ini akan dipanggil saat pengguna mengirimkan alamat kontrak
 async def handle_token_address_for_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     token_address = update.message.text.strip()
     
@@ -408,7 +427,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
     context.user_data['token_address'] = token_address
     
-    # Placeholder: Mengambil info token (harga, dll) akan dilakukan di sini
+    # Placeholder untuk informasi token
     price_info = {
         "price": 0.000002726,
         "lp": "76.7K MC",
@@ -469,7 +488,6 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
         await perform_trade(update, context, percentage)
         return ConversationHandler.END
     
-    # Handle other actions here (Anti-MEV, dll)
     await query.message.reply_text("This action is not yet implemented.")
     return AWAITING_TRADE_ACTION
 
@@ -480,7 +498,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             await update.message.reply_text("❌ Amount must be greater than 0.")
             return AWAITING_AMOUNT
         
-        # Panggil fungsi perform_trade dengan jumlah kustom
         await perform_trade(update, context, amount)
 
     except (ValueError, IndexError):
@@ -505,7 +522,6 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         output_mint = token_address
         amount_lamports = int(amount * 1_000_000_000)
     else: # sell
-        # Logika untuk sell, harus menghitung jumlah token berdasarkan persentase
         if amount_type == 'percentage':
             spl_tokens = solana_client.get_spl_token_balances(wallet["address"])
             token_balance = next((t['amount'] for t in spl_tokens if t['mint'] == token_address), 0)
@@ -513,9 +529,9 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 await update.message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
                 return
             amount_to_sell = token_balance * (amount / 100.0)
+            # Asumsi 6 desimal untuk SPL tokens
             amount_lamports = int(amount_to_sell * 1_000_000)
         else:
-            # Ini untuk sell dengan jumlah tertentu (jika diimplementasikan)
             amount_lamports = int(amount * 1_000_000)
             
         input_mint = token_address
@@ -556,6 +572,7 @@ async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEF
     )
     return AWAITING_TOKEN_ADDRESS
 
+
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env file")
@@ -568,6 +585,7 @@ def main() -> None:
         states={
             AWAITING_TOKEN_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
+                CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^dummy_.*$"),
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$")
             ],
             AWAITING_TRADE_ACTION: [
