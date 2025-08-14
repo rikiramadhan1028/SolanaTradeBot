@@ -1,6 +1,5 @@
 # blockchain_clients/solana_client.py
 
-import base64
 import json
 import base58
 from solders.transaction_status import TransactionConfirmationStatus
@@ -13,10 +12,10 @@ from solders.message import MessageV0
 from solana.rpc.types import TxOpts, TokenAccountOpts
 from spl.token.instructions import transfer_checked, get_associated_token_address
 from spl.token.constants import TOKEN_PROGRAM_ID
-from dex_integrations.jupiter_aggregator import get_swap_route, get_swap_transaction
-# Import baru untuk Pumpfun
+from dex_integrations.jupiter_aggregator import get_swap_route as jupiter_get_route, get_swap_transaction as jupiter_get_tx
 from dex_integrations.pumpfun_aggregator import get_pumpfun_swap_transaction
-
+from dex_integrations.raydium_aggregator import get_swap_route as raydium_get_route, get_swap_transaction as raydium_get_tx
+import base64
 
 class SolanaClient:
     def __init__(self, rpc_url: str):
@@ -50,20 +49,32 @@ class SolanaClient:
             raise ValueError(f"Invalid private key format: {e}")
 
     async def perform_swap(self, sender_private_key_json: str, amount_lamports: int,
-                           input_mint: str, output_mint: str) -> str:
+                           input_mint: str, output_mint: str, dex: str = "jupiter") -> str:
         try:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
+            
+            swap_transaction_b58 = None
 
-            route = await get_swap_route(input_mint, output_mint, amount_lamports)
-            if not route:
-                return "Error: No swap route found."
+            if dex == "jupiter":
+                route = await jupiter_get_route(input_mint, output_mint, amount_lamports)
+                if not route:
+                    return "Error: No swap route found on Jupiter."
+                swap_transaction_b58 = await jupiter_get_tx(route, public_key_str)
+                if not swap_transaction_b58:
+                    return "Error: Could not build swap transaction on Jupiter."
+            elif dex == "raydium":
+                route = await raydium_get_route(input_mint, output_mint, amount_lamports)
+                if not route:
+                    return "Error: No swap route found on Raydium."
+                swap_transaction_b58 = await raydium_get_tx(route, public_key_str)
+                if not swap_transaction_b58:
+                    return "Error: Could not build swap transaction on Raydium."
+            
+            else:
+                return "Error: Unsupported DEX."
 
-            swap_transaction = await get_swap_transaction(route, public_key_str)
-            if not swap_transaction:
-                return "Error: Could not build swap transaction."
-
-            raw_tx = base58.b58decode(swap_transaction)
+            raw_tx = base58.b58decode(swap_transaction_b58)
             tx = VersionedTransaction.deserialize(raw_tx)
             tx.sign([keypair])
 
@@ -73,7 +84,6 @@ class SolanaClient:
             print(f"Swap error details: {e}")
             return f"Error: {e}"
 
-    # Metode baru untuk swap di Pumpfun
     async def perform_pumpfun_swap(self, sender_private_key_json: str, amount: float,
                                    action: str, mint: str) -> str:
         try:
@@ -94,7 +104,6 @@ class SolanaClient:
         except Exception as e:
             print(f"Pumpfun Swap error details: {e}")
             return f"Error: {e}"
-
 
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:

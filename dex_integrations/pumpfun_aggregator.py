@@ -1,7 +1,7 @@
 import httpx
 import json
 import base64
-import config  # Import file konfigurasi
+import config
 
 PUMPPAL_TRADE_API_URL = "https://pumpportal.fun/api/trade-local"
 

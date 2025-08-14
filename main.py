@@ -42,7 +42,8 @@ def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 Buy/Sell", callback_data="buy_sell"),
          InlineKeyboardButton("🧾 Asset", callback_data="view_assets")],
         [InlineKeyboardButton("📋 Copy Trading", callback_data="copy_trading"),
-         InlineKeyboardButton("📉 Limit Order", callback_data="limit_order")],
+         [InlineKeyboardButton("📉 Limit Order", callback_data="limit_order"),
+          InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell")]],
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"),
          InlineKeyboardButton("👛 Wallet", callback_data="menu_wallet")],
         [InlineKeyboardButton("🌐 Language", callback_data="change_language"),
@@ -395,7 +396,6 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
 
     keyboard = [
-        # Mengubah callback_data agar sesuai dengan handler dummy
         [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
         [InlineKeyboardButton("✈️ Copy Trade", callback_data="dummy_copy_trade")],
         [InlineKeyboardButton("🤖 Auto Trade - Pumpfun", callback_data="pumpfun_trade")],
@@ -412,7 +412,6 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     return AWAITING_TOKEN_ADDRESS
 
-# Mengubah fungsi ini agar menangani tombol "buy" dan "sell" sebagai dummy
 async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer(f"Feature '{query.data}' is under development.", show_alert=True)
@@ -436,7 +435,29 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
     message_text = (
         f"**Token Address:** `{token_address}`\n"
         f"**Price:** ${price_info['price']:.8f} (LP: {price_info['lp']}, MC: {price_info['mc']})\n\n"
-        "**Choose your action:**"
+        "**Pilih DEX yang ingin digunakan:**"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("Jupiter", callback_data="trade_dex_jupiter"),
+         InlineKeyboardButton("Raydium", callback_data="trade_dex_raydium")]
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
+    ]
+
+    await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return AWAITING_TRADE_ACTION
+
+async def handle_trade_dex_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    dex_name = query.data.split('_')[-1]
+    context.user_data['selected_dex'] = dex_name
+    token_address = context.user_data.get('token_address')
+
+    message_text = (
+        f"✅ Anda memilih untuk trading `{token_address}` di **{dex_name.capitalize()}**.\n"
+        f"Silakan pilih aksi trading Anda:"
     )
 
     keyboard = [
@@ -445,17 +466,17 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
          InlineKeyboardButton("Buy 1 SOL", callback_data="buy_fixed_1")],
         [InlineKeyboardButton("Buy 2 SOL", callback_data="buy_fixed_2"),
          InlineKeyboardButton("Buy 5 SOL", callback_data="buy_fixed_5"),
-         InlineKeyboardButton("Buy X SOL...", callback_data="buy_custom")], # Perbaikan di sini
+         InlineKeyboardButton("Buy X SOL...", callback_data="buy_custom")],
         [InlineKeyboardButton("Sell 10%", callback_data="sell_pct_10"),
          InlineKeyboardButton("Sell 25%", callback_data="sell_pct_25"),
          InlineKeyboardButton("Sell 50%", callback_data="sell_pct_50"),
          InlineKeyboardButton("Sell All", callback_data="sell_pct_100")],
         [InlineKeyboardButton("Anti-MEV Buy", callback_data="anti_mev_buy"),
          InlineKeyboardButton("Anti-MEV Sell", callback_data="anti_mev_sell")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_dex_selection")]
     ]
 
-    await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     return AWAITING_TRADE_ACTION
 
 async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -515,7 +536,8 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     trade_type = context.user_data.get('trade_type')
     amount_type = context.user_data.get('amount_type')
     token_address = context.user_data.get('token_address')
-    
+    dex = context.user_data.get('selected_dex', 'jupiter')
+
     if trade_type == "buy":
         input_mint = SOLANA_NATIVE_TOKEN_MINT
         output_mint = token_address
@@ -535,13 +557,14 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         input_mint = token_address
         output_mint = SOLANA_NATIVE_TOKEN_MINT
     
-    await update.message.reply_text(f"⏳ Performing {trade_type} of token `{token_address}`...")
+    await update.message.reply_text(f"⏳ Performing {trade_type} of token `{token_address}` on {dex.capitalize()}...")
 
     tx_sig = await solana_client.perform_swap(
         sender_private_key_json=wallet["private_key"],
         amount_lamports=amount_lamports,
         input_mint=input_mint,
-        output_mint=output_mint
+        output_mint=output_mint,
+        dex=dex
     )
     
     if tx_sig.startswith("Error"):
@@ -569,6 +592,33 @@ async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEF
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return AWAITING_TOKEN_ADDRESS
+
+async def handle_back_to_dex_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    token_address = context.user_data.get('token_address')
+    
+    price_info = {
+        "price": 0.000002726,
+        "lp": "76.7K MC",
+        "mc": "272.7K"
+    }
+
+    message_text = (
+        f"**Token Address:** `{token_address}`\n"
+        f"**Price:** ${price_info['price']:.8f} (LP: {price_info['lp']}, MC: {price_info['mc']})\n\n"
+        "**Pilih DEX yang ingin digunakan:**"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("Jupiter", callback_data="trade_dex_jupiter"),
+         InlineKeyboardButton("Raydium", callback_data="trade_dex_raydium")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
+    ]
+
+    await query.edit_message_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return AWAITING_TRADE_ACTION
 
 async def handle_pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clear_user_context(context)
@@ -634,12 +684,14 @@ def main() -> None:
         states={
             AWAITING_TOKEN_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
-                CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*|trade_buy|trade_sell)$"),
+                CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*)$"),
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$")
             ],
             AWAITING_TRADE_ACTION: [
-                CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)"),
-                CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$")
+                 CallbackQueryHandler(handle_trade_dex_selection, pattern=r"^trade_dex_.*$"),
+                 CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)"),
+                 CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
+                 CallbackQueryHandler(handle_back_to_dex_selection, pattern="^back_to_dex_selection$"),
             ],
             AWAITING_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
