@@ -54,12 +54,15 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
     wallet_info = database.get_user_wallet(user_id)
     solana_address = wallet_info.get("address", "--")
     sol_balance_str = "--"
-    if solana_address != "--":
+    
+    # Perbaikan: Tambahkan pemeriksaan is not None
+    if solana_address is not None and solana_address != "--":
         try:
             sol_balance = solana_client.get_balance(solana_address)
             sol_balance_str = f"{sol_balance:.4f} SOL"
         except Exception:
             sol_balance_str = "Error"
+            
     welcome_text = (
         f"👋 Hello {user_mention}! Welcome to <b>TradeBeat Bot</b>\n\n"
         f"Wallet address: <code>{solana_address}</code>\n"
@@ -443,7 +446,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
          InlineKeyboardButton("Buy 1 SOL", callback_data="buy_fixed_1")],
         [InlineKeyboardButton("Buy 2 SOL", callback_data="buy_fixed_2"),
          InlineKeyboardButton("Buy 5 SOL", callback_data="buy_fixed_5"),
-         InlineKeyboardButton("Buy X SOL...", callback_data="buy_custom")],
+         [InlineKeyboardButton("Buy X SOL...", callback_data="buy_custom")]],
         [InlineKeyboardButton("Sell 10%", callback_data="sell_pct_10"),
          InlineKeyboardButton("Sell 25%", callback_data="sell_pct_25"),
          InlineKeyboardButton("Sell 50%", callback_data="sell_pct_50"),
@@ -632,6 +635,7 @@ def main() -> None:
         states={
             AWAITING_TOKEN_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
+                # Memperbaiki pola untuk menyertakan trade_buy dan trade_sell
                 CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*|trade_buy|trade_sell)$"),
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$")
             ],
