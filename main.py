@@ -527,10 +527,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
+    # Dapatkan objek message yang benar, entah dari update.message atau update.callback_query.message
+    message = update.message if update.message else update.callback_query.message
+    
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
     if not wallet or not wallet["private_key"]:
-        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.")
+        await message.reply_text("❌ No Solana wallet found. Please create or import one first.")
         return
     
     trade_type = context.user_data.get('trade_type')
@@ -547,7 +550,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             spl_tokens = solana_client.get_spl_token_balances(wallet["address"])
             token_balance = next((t['amount'] for t in spl_tokens if t['mint'] == token_address), 0)
             if token_balance <= 0:
-                await update.message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
+                await message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
                 return
             amount_to_sell = token_balance * (amount / 100.0)
             amount_lamports = int(amount_to_sell * 1_000_000)
@@ -557,7 +560,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         input_mint = token_address
         output_mint = SOLANA_NATIVE_TOKEN_MINT
     
-    await update.message.reply_text(f"⏳ Performing {trade_type} of token `{token_address}` on {dex.capitalize()}...")
+    await message.reply_text(f"⏳ Performing {trade_type} of token `{token_address}` on {dex.capitalize()}...")
 
     tx_sig = await solana_client.perform_swap(
         sender_private_key_json=wallet["private_key"],
@@ -568,15 +571,15 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     )
     
     if tx_sig.startswith("Error"):
-        await update.message.reply_text(f"❌ Swap failed: {tx_sig}")
+        await message.reply_text(f"❌ Swap failed: {tx_sig}")
     else:
-        await update.message.reply_text(
+        await message.reply_text(
             f"✅ Swap successful! View transaction: https://explorer.solana.com/tx/{tx_sig}?cluster=devnet",
             parse_mode='Markdown'
         )
 
     clear_user_context(context)
-    await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+    await message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
 
 async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
