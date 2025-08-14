@@ -17,6 +17,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 import re
 import asyncio
+import base64
 
 # === Konfigurasi & Inisialisasi ===
 load_dotenv()
@@ -25,7 +26,7 @@ SOLANA_NATIVE_TOKEN_MINT = "So11111111111111111111111111111111111111112"
 solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
 # === States untuk ConversationHandler ===
-AWAITING_TOKEN_ADDRESS, AWAITING_TRADE_ACTION, AWAITING_AMOUNT = range(3)
+AWAITING_TOKEN_ADDRESS, AWAITING_TRADE_ACTION, AWAITING_AMOUNT, PUMPFUN_AWAITING_TOKEN = range(4)
 
 # === Fungsi helper untuk membersihkan context ===
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
@@ -385,8 +386,6 @@ async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DE
     return ConversationHandler.END
 
 # === Fungsi-fungsi Alur Percakapan Trading Baru ===
-
-# Fungsi ini menampilkan menu buy/sell awal
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clear_user_context(context)
     
@@ -394,9 +393,9 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
+        [InlineKeyboardButton("Buy", callback_data="trade_buy"), InlineKeyboardButton("Sell", callback_data="trade_sell")],
         [InlineKeyboardButton("✈️ Copy Trade", callback_data="dummy_copy_trade")],
-        [InlineKeyboardButton("🤖 Auto Trade - Pumpfun", callback_data="dummy_auto_trade")],
+        [InlineKeyboardButton("🤖 Auto Trade - Pumpfun", callback_data="pumpfun_trade")],
         [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders"), InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell")],
         [InlineKeyboardButton("📈 Positions", callback_data="dummy_positions"), InlineKeyboardButton("👛 Wallet", callback_data="dummy_wallet"), InlineKeyboardButton("❓ Help", callback_data="dummy_help")],
         [InlineKeyboardButton("💵 Smart Wallet", callback_data="dummy_smart_wallet"), InlineKeyboardButton("🖥️ Extension", callback_data="dummy_extension")],
@@ -404,20 +403,17 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
     ]
     
-    message_text = "Enter a token address to buy"
+    message_text = "Choose a trading option or enter a token address to start trading."
     
     await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     return AWAITING_TOKEN_ADDRESS
 
-# Fungsi ini akan menangani klik pada tombol-tombol dummy di menu buy/sell awal
 async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer(f"Feature '{query.data}' is under development.", show_alert=True)
-    # Tetap di state yang sama, menunggu input teks
     return AWAITING_TOKEN_ADDRESS
 
-# Fungsi ini akan dipanggil saat pengguna mengirimkan alamat kontrak
 async def handle_token_address_for_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     token_address = update.message.text.strip()
     
@@ -529,7 +525,6 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 await update.message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
                 return
             amount_to_sell = token_balance * (amount / 100.0)
-            # Asumsi 6 desimal untuk SPL tokens
             amount_lamports = int(amount_to_sell * 1_000_000)
         else:
             amount_lamports = int(amount * 1_000_000)
@@ -572,6 +567,55 @@ async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEF
     )
     return AWAITING_TOKEN_ADDRESS
 
+async def handle_pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    clear_user_context(context)
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]
+    ]
+    await query.edit_message_text(
+        "🤖 **Pumpfun Auto Trade**\n\n"
+        "Please send the **token contract address** you want to trade on Pumpfun.",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return PUMPFUN_AWAITING_TOKEN
+
+async def handle_pumpfun_trade_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    token_address = update.message.text.strip()
+    
+    if len(token_address) < 32 or len(token_address) > 44:
+        await update.message.reply_text("❌ Invalid token address format. Please enter a valid Solana token address.")
+        return PUMPFUN_AWAITING_TOKEN
+
+    user_id = update.effective_user.id
+    wallet = database.get_user_wallet(user_id)
+    if not wallet or not wallet["private_key"]:
+        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(f"⏳ Performing a buy trade on Pumpfun for token `{token_address}` with 0.1 SOL...")
+
+    # Di sini kita melakukan hardcode untuk jumlah 0.1 SOL untuk mempermudah. Anda bisa mengubah ini nanti.
+    tx_sig = await solana_client.perform_pumpfun_swap(
+        sender_private_key_json=wallet["private_key"],
+        action="buy",
+        mint=token_address,
+        amount=0.1
+    )
+    
+    if tx_sig and not tx_sig.startswith("Error"):
+        await update.message.reply_text(
+            f"✅ Pumpfun buy successful! View transaction: https://explorer.solana.com/tx/{tx_sig}?cluster=devnet",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(f"❌ Pumpfun buy failed.\n{tx_sig}")
+
+    clear_user_context(context)
+    return ConversationHandler.END
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
@@ -581,7 +625,10 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     trade_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(buy_sell, pattern="^buy_sell$")],
+        entry_points=[
+            CallbackQueryHandler(buy_sell, pattern="^buy_sell$"),
+            CallbackQueryHandler(handle_pumpfun_trade_entry, pattern="^pumpfun_trade$")
+        ],
         states={
             AWAITING_TOKEN_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
@@ -595,6 +642,9 @@ def main() -> None:
             AWAITING_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
             ],
+            PUMPFUN_AWAITING_TOKEN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_trade_token)
+            ]
         },
         fallbacks=[
             CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),

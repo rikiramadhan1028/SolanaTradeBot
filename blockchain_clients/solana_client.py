@@ -1,5 +1,6 @@
 # blockchain_clients/solana_client.py
 
+import base64
 import json
 import base58
 from solders.transaction_status import TransactionConfirmationStatus
@@ -13,6 +14,8 @@ from solana.rpc.types import TxOpts, TokenAccountOpts
 from spl.token.instructions import transfer_checked, get_associated_token_address
 from spl.token.constants import TOKEN_PROGRAM_ID
 from dex_integrations.jupiter_aggregator import get_swap_route, get_swap_transaction
+# Import baru untuk Pumpfun
+from dex_integrations.pumpfun_aggregator import get_pumpfun_swap_transaction
 
 
 class SolanaClient:
@@ -69,6 +72,29 @@ class SolanaClient:
         except Exception as e:
             print(f"Swap error details: {e}")
             return f"Error: {e}"
+
+    # Metode baru untuk swap di Pumpfun
+    async def perform_pumpfun_swap(self, sender_private_key_json: str, amount: float,
+                                   action: str, mint: str) -> str:
+        try:
+            keypair = self._get_keypair_from_private_key(sender_private_key_json)
+            public_key_str = str(keypair.pubkey())
+
+            transaction_base64 = await get_pumpfun_swap_transaction(public_key_str, action, mint, amount)
+            if not transaction_base64:
+                return "Error: Could not build Pumpfun transaction."
+
+            tx_bytes = base64.b64decode(transaction_base64)
+            tx = VersionedTransaction.deserialize(tx_bytes)
+            tx.sign([keypair])
+
+            tx_sig = self.client.send_transaction(tx)
+            return str(tx_sig.value)
+
+        except Exception as e:
+            print(f"Pumpfun Swap error details: {e}")
+            return f"Error: {e}"
+
 
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
