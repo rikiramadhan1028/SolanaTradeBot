@@ -36,7 +36,6 @@ def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
 
 # === Fungsi-fungsi Bot ===
 def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    # Perbaikan: Menghapus nested list yang menyebabkan error
     keyboard = [
         [InlineKeyboardButton("⚡ Import Wallet", callback_data="import_wallet"),
          InlineKeyboardButton("🏆 Invite Friends", callback_data="invite_friends")],
@@ -441,7 +440,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
     keyboard = [
         [InlineKeyboardButton("Jupiter", callback_data="trade_dex_jupiter"),
-         InlineKeyboardButton("Raydium", callback_data="trade_dex_raydium")]
+         InlineKeyboardButton("Raydium", callback_data="trade_dex_raydium")],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
     ]
 
@@ -614,7 +613,7 @@ async def handle_back_to_dex_selection(update: Update, context: ContextTypes.DEF
 
     keyboard = [
         [InlineKeyboardButton("Jupiter", callback_data="trade_dex_jupiter"),
-         InlineKeyboardButton("Raydium", callback_data="trade_dex_raydium")]
+         InlineKeyboardButton("Raydium", callback_data="trade_dex_raydium")],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
     ]
 
