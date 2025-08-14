@@ -25,7 +25,7 @@ SOLANA_NATIVE_TOKEN_MINT = "So11111111111111111111111111111111111111112"
 solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
 # === States untuk ConversationHandler ===
-AWAITING_TRADE_TYPE, AWAITING_TOKEN_ADDRESS, AWAITING_AMOUNT = range(3)
+AWAITING_TOKEN_ADDRESS, AWAITING_TRADE_ACTION, AWAITING_AMOUNT = range(3)
 
 # === Fungsi helper untuk membersihkan context ===
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
@@ -69,7 +69,6 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
     return welcome_text
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Reset context setiap kali start dipanggil
     clear_user_context(context)
     
     user_id = update.effective_user.id
@@ -78,7 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -112,7 +111,7 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -124,7 +123,7 @@ async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text("Wallet Options:", reply_markup=InlineKeyboardMarkup(keyboard_buttons))
 
 async def handle_create_wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -140,7 +139,7 @@ async def handle_create_wallet_callback(update: Update, context: ContextTypes.DE
     )
 
 async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -157,46 +156,35 @@ async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 def validate_and_clean_private_key(key_data: str) -> str:
-    """
-    Validasi dan bersihkan private key dari format yang berbeda
-    """
     key_data = key_data.strip()
     
-    # Jika dimulai dengan '[' berarti JSON array
     if key_data.startswith('['):
         try:
-            # Pastikan JSON valid
             parsed = json.loads(key_data)
             if not isinstance(parsed, list):
                 raise ValueError("JSON must be a list of integers")
             if len(parsed) != 64:
                 raise ValueError("Private key must be 64 bytes")
-            return key_data  # Return as JSON string untuk konsistensi
+            return key_data
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON format: {e}")
     
-    # Jika berupa string Base58
     else:
         try:
-            # Coba parse sebagai Base58 dulu
             import base58
             decoded = base58.b58decode(key_data)
-            if len(decoded) != 64:  # Solana private key harus 64 bytes
+            if len(decoded) != 64:
                 raise ValueError("Private key must be 64 bytes")
-            # Return as Base58 string untuk konsistensi dengan library solders
             return key_data
         except Exception as decode_error:
-            # Jika gagal Base58, coba sebagai hex
             try:
                 if key_data.startswith('0x'):
                     key_data = key_data[2:]
                 
-                # Convert hex to bytes array
                 key_bytes = bytes.fromhex(key_data)
                 if len(key_bytes) != 64:
                     raise ValueError("Private key must be 64 bytes")
                 
-                # Convert to Base58 untuk konsistensi
                 import base58
                 return base58.b58encode(key_bytes).decode()
             except Exception as hex_error:
@@ -208,7 +196,6 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     command, *args = text.split(maxsplit=1)
     command = command.lower()
 
-    # Reset context untuk setiap command baru
     clear_user_context(context)
 
     if command == "import":
@@ -218,13 +205,11 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             key_data = args[0].strip()
             
-            # Validasi dan bersihkan private key
             cleaned_key = validate_and_clean_private_key(key_data)
             
             old_wallet = database.get_user_wallet(user_id)
             already_exists = old_wallet.get("address") is not None
             
-            # Test private key sebelum menyimpan
             try:
                 pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(cleaned_key)
             except Exception as e:
@@ -241,12 +226,12 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
         except ValueError as e:
             await update.message.reply_text(f"❌ Error importing Solana wallet: {e}")
         except Exception as e:
-            print(f"Import error: {e}")  # Debug log
+            print(f"Import error: {e}")
             await update.message.reply_text(f"❌ An unexpected error occurred during import. Please check your private key format.")
         return
 
     if command == "send":
-        try: # Added try block for send command
+        try:
             if len(args) == 0:
                 await update.message.reply_text("❌ Invalid format. Use `send [address] [amount]`")
                 return
@@ -332,7 +317,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("❌ Unrecognized command. Please use `import`, `send`, or `sendtoken`.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -342,7 +327,7 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode='HTML')
 
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -350,7 +335,7 @@ async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"🛠️ Feature `{query.data}` is under development.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -361,7 +346,7 @@ async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
@@ -378,27 +363,17 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Menangani pembatalan percakapan.
-    Fungsi ini dipanggil oleh fallback ConversationHandler
-    saat tombol 'Cancel' diklik.
-    """
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
 
-    # Periksa apakah update berasal dari callback query (tombol inline)
     if update.callback_query:
         query = update.callback_query
-        # Panggil query.answer() untuk menghilangkan status loading pada tombol
         await query.answer()
-        # Edit pesan yang sudah ada untuk memberitahu pengguna bahwa trade dibatalkan
         await query.edit_message_text(
             "Trade has been cancelled.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]
             )
         )
-    # Jika update berasal dari pesan (meskipun jarang terjadi di skenario ini),
-    # tetap berikan balasan.
     elif update.message:
         await update.message.reply_text(
             "Trade has been cancelled.",
@@ -409,111 +384,177 @@ async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DE
 
     return ConversationHandler.END
 
-# === Fungsi untuk Alur Percakapan Trading ===
+# === Fungsi untuk Alur Percakapan Trading yang Baru ===
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    clear_user_context(context)  # Reset context
+    clear_user_context(context)
     
     query = update.callback_query
     await query.answer()
-    keyboard = [
-        [InlineKeyboardButton("Buy with SOL", callback_data="trade_buy")],
-        [InlineKeyboardButton("Sell to SOL", callback_data="trade_sell")],
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
-    ]
-    await query.edit_message_text("💰 Choose your trading action:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return AWAITING_TRADE_TYPE
-
-async def handle_trade_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    trade_type = query.data.split('_')[1]
-    context.user_data['trade_type'] = trade_type
-    
     keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
     
-    if trade_type == "buy":
-        await query.edit_message_text("📄 Please send the **token contract address** you want to buy.", reply_markup=InlineKeyboardMarkup(keyboard))
-    else: # sell
-        await query.edit_message_text("📄 Please send the **token contract address** you want to sell.", reply_markup=InlineKeyboardMarkup(keyboard))
-    
+    await query.edit_message_text(
+        "📄 Please send the **token contract address** you want to trade.",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return AWAITING_TOKEN_ADDRESS
 
-async def handle_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_token_address_for_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     token_address = update.message.text.strip()
     
-    # Validasi token address (basic validation)
     if len(token_address) < 32 or len(token_address) > 44:
         await update.message.reply_text("❌ Invalid token address format. Please enter a valid Solana token address.")
         return AWAITING_TOKEN_ADDRESS
-    
+
     context.user_data['token_address'] = token_address
     
-    keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
-    
-    trade_type = context.user_data.get('trade_type')
-    if trade_type == "buy":
-        await update.message.reply_text(f"💰 You chose to **buy** `{token_address}`.\n\n"
-                                        f"Please send the amount of **SOL** you want to use.", reply_markup=InlineKeyboardMarkup(keyboard))
-    else: # sell
-        await update.message.reply_text(f"💰 You chose to **sell** `{token_address}`.\n\n"
-                                        f"Please send the amount of **tokens** you want to sell.", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    return AWAITING_AMOUNT
+    # Placeholder: Mengambil info token (harga, dll) akan dilakukan di sini
+    price_info = {
+        "price": 0.000002726,
+        "lp": "76.7K MC",
+        "mc": "272.7K"
+    }
 
-async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    wallet = database.get_user_wallet(user_id)
-    if not wallet or not wallet["private_key"]:
-        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
+    message_text = (
+        f"**Token Address:** `{token_address}`\n"
+        f"**Price:** ${price_info['price']:.8f} (LP: {price_info['lp']}, MC: {price_info['mc']})\n\n"
+        "**Choose your action:**"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("Buy 0.2 SOL", callback_data="buy_fixed_0.2"),
+         InlineKeyboardButton("Buy 0.5 SOL", callback_data="buy_fixed_0.5"),
+         InlineKeyboardButton("Buy 1 SOL", callback_data="buy_fixed_1")],
+        [InlineKeyboardButton("Buy 2 SOL", callback_data="buy_fixed_2"),
+         InlineKeyboardButton("Buy 5 SOL", callback_data="buy_fixed_5"),
+         InlineKeyboardButton("Buy X SOL...", callback_data="buy_custom")],
+        [InlineKeyboardButton("Sell 10%", callback_data="sell_pct_10"),
+         InlineKeyboardButton("Sell 25%", callback_data="sell_pct_25"),
+         InlineKeyboardButton("Sell 50%", callback_data="sell_pct_50"),
+         InlineKeyboardButton("Sell All", callback_data="sell_pct_100")],
+        [InlineKeyboardButton("Anti-MEV Buy", callback_data="anti_mev_buy"),
+         InlineKeyboardButton("Anti-MEV Sell", callback_data="anti_mev_sell")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
+    ]
+
+    await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return AWAITING_TRADE_ACTION
+
+async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    action = query.data
+    
+    if action.startswith("buy_fixed_"):
+        amount_str = action.split('_')[-1]
+        amount = float(amount_str)
+        context.user_data['trade_type'] = 'buy'
+        context.user_data['amount_type'] = 'sol'
+        await perform_trade(update, context, amount)
+        return ConversationHandler.END
+        
+    elif action == "buy_custom":
+        context.user_data['trade_type'] = 'buy'
+        context.user_data['amount_type'] = 'sol'
+        keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
+        await query.edit_message_text(f"Please enter the amount of SOL you want to buy with:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return AWAITING_AMOUNT
+
+    elif action.startswith("sell_pct_"):
+        percentage_str = action.split('_')[-1]
+        percentage = int(percentage_str)
+        context.user_data['trade_type'] = 'sell'
+        context.user_data['amount_type'] = 'percentage'
+        await perform_trade(update, context, percentage)
         return ConversationHandler.END
     
+    # Handle other actions here (Anti-MEV, dll)
+    await query.message.reply_text("This action is not yet implemented.")
+    return AWAITING_TRADE_ACTION
+
+async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         amount = float(update.message.text.strip())
         if amount <= 0:
             await update.message.reply_text("❌ Amount must be greater than 0.")
             return AWAITING_AMOUNT
-            
-        trade_type = context.user_data.get('trade_type')
-        token_address = context.user_data.get('token_address')
-
-        if trade_type == "buy":
-            input_mint = SOLANA_NATIVE_TOKEN_MINT
-            output_mint = token_address
-            amount_lamports = int(amount * 1_000_000_000)
-            await update.message.reply_text(f"⏳ Buying token `{output_mint}` with `{amount}` SOL...")
-        else: # sell
-            input_mint = token_address
-            output_mint = SOLANA_NATIVE_TOKEN_MINT
-            amount_lamports = int(amount * 1_000_000) # Asumsi 6 desimal untuk SPL tokens
-            await update.message.reply_text(f"⏳ Selling token `{input_mint}` for `{amount}` SOL...")
         
-        tx_sig = await solana_client.perform_swap(
-            sender_private_key_json=wallet["private_key"],
-            amount_lamports=amount_lamports,
-            input_mint=input_mint,
-            output_mint=output_mint
-        )
+        # Panggil fungsi perform_trade dengan jumlah kustom
+        await perform_trade(update, context, amount)
 
-        if tx_sig.startswith("Error"):
-            await update.message.reply_text(f"❌ Swap failed: {tx_sig}")
-        else:
-            await update.message.reply_text(
-                f"✅ Swap successful! View transaction: https://explorer.solana.com/tx/{tx_sig}?cluster=devnet",
-                parse_mode='Markdown'
-            )
-            
     except (ValueError, IndexError):
         await update.message.reply_text("❌ Invalid amount. Please enter a valid number.")
         return AWAITING_AMOUNT
-    except Exception as e:
-        print(f"Swap error: {e}")  # Debug log
-        await update.message.reply_text(f"❌ An unexpected error occurred: {e}")
+
+    return ConversationHandler.END
+
+async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
+    user_id = update.effective_user.id
+    wallet = database.get_user_wallet(user_id)
+    if not wallet or not wallet["private_key"]:
+        await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.")
+        return
     
-    # Clear context setelah selesai
+    trade_type = context.user_data.get('trade_type')
+    amount_type = context.user_data.get('amount_type')
+    token_address = context.user_data.get('token_address')
+    
+    if trade_type == "buy":
+        input_mint = SOLANA_NATIVE_TOKEN_MINT
+        output_mint = token_address
+        amount_lamports = int(amount * 1_000_000_000)
+    else: # sell
+        # Logika untuk sell, harus menghitung jumlah token berdasarkan persentase
+        if amount_type == 'percentage':
+            spl_tokens = solana_client.get_spl_token_balances(wallet["address"])
+            token_balance = next((t['amount'] for t in spl_tokens if t['mint'] == token_address), 0)
+            if token_balance <= 0:
+                await update.message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
+                return
+            amount_to_sell = token_balance * (amount / 100.0)
+            amount_lamports = int(amount_to_sell * 1_000_000)
+        else:
+            # Ini untuk sell dengan jumlah tertentu (jika diimplementasikan)
+            amount_lamports = int(amount * 1_000_000)
+            
+        input_mint = token_address
+        output_mint = SOLANA_NATIVE_TOKEN_MINT
+    
+    await update.message.reply_text(f"⏳ Performing {trade_type} of token `{token_address}`...")
+
+    tx_sig = await solana_client.perform_swap(
+        sender_private_key_json=wallet["private_key"],
+        amount_lamports=amount_lamports,
+        input_mint=input_mint,
+        output_mint=output_mint
+    )
+    
+    if tx_sig.startswith("Error"):
+        await update.message.reply_text(f"❌ Swap failed: {tx_sig}")
+    else:
+        await update.message.reply_text(
+            f"✅ Swap successful! View transaction: https://explorer.solana.com/tx/{tx_sig}?cluster=devnet",
+            parse_mode='Markdown'
+        )
+
     clear_user_context(context)
-    
     await update.message.reply_text("Done! What's next?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]))
     return ConversationHandler.END
+
+async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    clear_user_context(context)
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
+    
+    await query.edit_message_text(
+        "📄 Please send the **token contract address** you want to trade.",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return AWAITING_TOKEN_ADDRESS
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
@@ -525,9 +566,17 @@ def main() -> None:
     trade_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(buy_sell, pattern="^buy_sell$")],
         states={
-            AWAITING_TRADE_TYPE: [CallbackQueryHandler(handle_trade_type, pattern=r"trade_.*")],
-            AWAITING_TOKEN_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address)],
-            AWAITING_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount)],
+            AWAITING_TOKEN_ADDRESS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
+                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$")
+            ],
+            AWAITING_TRADE_ACTION: [
+                CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)"),
+                CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$")
+            ],
+            AWAITING_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
+            ],
         },
         fallbacks=[
             CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
