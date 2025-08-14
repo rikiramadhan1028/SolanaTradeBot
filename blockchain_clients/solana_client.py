@@ -14,7 +14,7 @@ from spl.token.instructions import transfer_checked, get_associated_token_addres
 from spl.token.constants import TOKEN_PROGRAM_ID
 from dex_integrations.jupiter_aggregator import get_swap_route as jupiter_get_route, get_swap_transaction as jupiter_get_tx
 from dex_integrations.pumpfun_aggregator import get_pumpfun_swap_transaction
-from dex_integrations.raydium_aggregator import get_swap_route as raydium_get_route, get_swap_transaction as raydium_get_tx
+from dex_integrations.raydium_aggregator import get_swap_quote as raydium_get_quote, get_swap_transaction as raydium_get_tx
 import base64
 
 class SolanaClient:
@@ -54,27 +54,27 @@ class SolanaClient:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
             
-            swap_transaction_b58 = None
+            swap_transaction_b64 = None
 
             if dex == "jupiter":
                 route = await jupiter_get_route(input_mint, output_mint, amount_lamports)
                 if not route:
                     return "Error: No swap route found on Jupiter."
-                swap_transaction_b58 = await jupiter_get_tx(route, public_key_str)
-                if not swap_transaction_b58:
+                swap_transaction_b64 = await jupiter_get_tx(route, public_key_str)
+                if not swap_transaction_b64:
                     return "Error: Could not build swap transaction on Jupiter."
             elif dex == "raydium":
-                route = await raydium_get_route(input_mint, output_mint, amount_lamports)
-                if not route:
-                    return "Error: No swap route found on Raydium."
-                swap_transaction_b58 = await raydium_get_tx(route, public_key_str)
-                if not swap_transaction_b58:
+                quote = await raydium_get_quote(input_mint, output_mint, amount_lamports)
+                if not quote:
+                    return "Error: Could not get a quote from Raydium."
+                swap_transaction_b64 = await raydium_get_tx(quote, public_key_str)
+                if not swap_transaction_b64:
                     return "Error: Could not build swap transaction on Raydium."
             
             else:
                 return "Error: Unsupported DEX."
 
-            raw_tx = base58.b58decode(swap_transaction_b58)
+            raw_tx = base64.b64decode(swap_transaction_b64)
             tx = VersionedTransaction.deserialize(raw_tx)
             tx.sign([keypair])
 

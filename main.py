@@ -428,10 +428,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
     context.user_data['token_address'] = token_address
 
-    # Dapatkan harga dari Raydium
     price_data = await get_token_price_from_raydium(token_address)
-    
-    # Jika Raydium tidak memiliki data, coba dari Pumpfun
     if price_data['price'] <= 0:
         price_data = await get_token_price_from_pumpfun(token_address)
     
