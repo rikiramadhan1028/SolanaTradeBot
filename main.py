@@ -393,7 +393,8 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
 
     keyboard = [
-        [InlineKeyboardButton("Buy", callback_data="trade_buy"), InlineKeyboardButton("Sell", callback_data="trade_sell")],
+        # Mengubah callback_data agar sesuai dengan handler dummy
+        [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
         [InlineKeyboardButton("✈️ Copy Trade", callback_data="dummy_copy_trade")],
         [InlineKeyboardButton("🤖 Auto Trade - Pumpfun", callback_data="pumpfun_trade")],
         [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders"), InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell")],
@@ -409,6 +410,7 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     return AWAITING_TOKEN_ADDRESS
 
+# Mengubah fungsi ini agar menangani tombol "buy" dan "sell" sebagai dummy
 async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer(f"Feature '{query.data}' is under development.", show_alert=True)
@@ -423,7 +425,6 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
     context.user_data['token_address'] = token_address
     
-    # Placeholder untuk informasi token
     price_info = {
         "price": 0.000002726,
         "lp": "76.7K MC",
@@ -598,7 +599,6 @@ async def handle_pumpfun_trade_token(update: Update, context: ContextTypes.DEFAU
 
     await update.message.reply_text(f"⏳ Performing a buy trade on Pumpfun for token `{token_address}` with 0.1 SOL...")
 
-    # Di sini kita melakukan hardcode untuk jumlah 0.1 SOL untuk mempermudah. Anda bisa mengubah ini nanti.
     tx_sig = await solana_client.perform_pumpfun_swap(
         sender_private_key_json=wallet["private_key"],
         action="buy",
@@ -632,7 +632,7 @@ def main() -> None:
         states={
             AWAITING_TOKEN_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
-                CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^dummy_.*$"),
+                CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*|trade_buy|trade_sell)$"),
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$")
             ],
             AWAITING_TRADE_ACTION: [
@@ -643,7 +643,8 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
             ],
             PUMPFUN_AWAITING_TOKEN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_trade_token)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_trade_token),
+                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$")
             ]
         },
         fallbacks=[
