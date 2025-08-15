@@ -7,6 +7,22 @@ from dotenv import load_dotenv
 import config
 import database
 import wallet_manager
+
+# --- Back buttons helpers ---
+from typing import Optional
+
+def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Why: ensure every message has a way to go back.
+    If prev_cb is given -> show both '⬅️ Back' (prev) and '🏠 Menu'.
+    Else -> only '🏠 Menu'.
+    """
+    rows = []
+    if prev_cb:
+        rows.append(InlineKeyboardButton("⬅️ Back", callback_data=prev_cb))
+    rows.append(InlineKeyboardButton("🏠 Menu", callback_data="back_to_main_menu"))
+    return InlineKeyboardMarkup([rows])
+
 from blockchain_clients.solana_client import SolanaClient
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -573,7 +589,10 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
     if not wallet or not wallet.get("private_key"):
-        await message.reply_text("❌ No Solana wallet found. Please create or import one first.")
+        await message.reply_text(
+            "❌ No Solana wallet found. Please create or import one first.",
+            reply_markup=back_markup("back_to_dex_selection"),
+        )
         return
 
     trade_type = (context.user_data.get("trade_type") or "").lower()
@@ -581,19 +600,18 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     token_address = context.user_data.get("token_address")
     dex = (context.user_data.get("selected_dex") or "jupiter").lower()
 
-    # Guard: mint harus ada
     if not token_address:
         await message.reply_text(
-            "❌ No token mint in context. Please tap Buy/Sell, paste the token address, then choose a DEX."
+            "❌ No token mint in context. Please tap Buy/Sell, paste the token address, then choose a DEX.",
+            reply_markup=back_markup("back_to_buy_sell_menu"),
         )
         return
 
-    # Helper: decimals fallback (repo belum expose util ini)
+    # decimals helper (fallback 6 when unknown)
     def _decimals_or_default(mint: str, default: int = 6) -> int:
         try:
-            # if your SolanaClient exposes get_token_decimals
             if hasattr(solana_client, "get_token_decimals"):
-                d = solana_client.get_token_decimals(mint)  # type: ignore[attr-defined]
+                d = solana_client.get_token_decimals(mint)  # optional in your client
                 if isinstance(d, int) and 0 <= d <= 18:
                     return d
         except Exception:
@@ -603,30 +621,31 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     if trade_type == "buy":
         input_mint = SOLANA_NATIVE_TOKEN_MINT
         output_mint = token_address
-        # SOL -> lamports
-        amount_lamports = int(float(amount) * 1_000_000_000)
+        amount_lamports = int(float(amount) * 1_000_000_000)  # SOL -> lamports
     else:
-        # SELL path
         input_mint = token_address
         output_mint = SOLANA_NATIVE_TOKEN_MINT
-
         if amount_type == "percentage":
-            # Ambil balance token (dlm unit token), konversi ke base units pakai decimals (fallback 6)
             decimals = _decimals_or_default(token_address, 6)
             spl_tokens = solana_client.get_spl_token_balances(wallet["address"])
             token_balance = next((t["amount"] for t in spl_tokens if t["mint"] == token_address), 0)
             if token_balance <= 0:
-                await message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
+                await message.reply_text(
+                    f"❌ Insufficient balance for token `{token_address}`.",
+                    reply_markup=back_markup("back_to_dex_selection"),
+                )
                 return
             amount_to_sell = float(token_balance) * (float(amount) / 100.0)
             amount_lamports = int(amount_to_sell * (10 ** decimals))
         else:
-            # Jika user memasukkan jumlah token langsung, konversi ke base units
             decimals = _decimals_or_default(token_address, 6)
             amount_lamports = int(float(amount) * (10 ** decimals))
 
     dex_label = "Raydium (via Jupiter direct route)" if dex == "raydium" else "Jupiter"
-    await message.reply_text(f"⏳ Performing {trade_type} on `{token_address}` via {dex_label} ...")
+    await message.reply_text(
+        f"⏳ Performing {trade_type} on `{token_address}` via {dex_label} ...",
+        reply_markup=back_markup("back_to_dex_selection"),
+    )
 
     try:
         res = await dex_swap(
@@ -639,7 +658,10 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             priority_fee_sol=0.0,
         )
     except Exception as e:
-        await message.reply_text(f"❌ Swap failed: {e}")
+        await message.reply_text(
+            f"❌ Swap failed: {e}",
+            reply_markup=back_markup("back_to_dex_selection"),
+        )
         clear_user_context(context)
         return ConversationHandler.END
 
@@ -647,19 +669,22 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         await message.reply_text(
             f"✅ Swap successful! View: https://explorer.solana.com/tx/{res['signature']}",
             disable_web_page_preview=True,
+            reply_markup=back_markup("back_to_dex_selection"),
         )
     else:
         err = res.get("error") if isinstance(res, dict) else res
-        await message.reply_text(f"❌ Swap failed: {err}")
+        await message.reply_text(
+            f"❌ Swap failed: {err}",
+            reply_markup=back_markup("back_to_dex_selection"),
+        )
 
     clear_user_context(context)
     await message.reply_text(
         "Done! What's next?",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]
-        ),
+        reply_markup=back_markup(None),
     )
     return ConversationHandler.END
+
 
 
 
