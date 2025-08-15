@@ -5,7 +5,7 @@ import base58
 import httpx
 
 from solana.rpc.api import Client
-from solana.rpc.types import TxOpts
+from solana.rpc.types import TxOpts, TokenAccountOpts
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -398,63 +398,67 @@ class SolanaClient:
 
     def get_spl_token_balances(self, owner_address: str):
         """
-        Return a list of SPL token balances for the owner.
-
-        Output format:
+        Return list SPL balances:
         [
-          {"mint": "<mint>", "amount": <float uiAmount>, "decimals": <int>, "account": "<token_account_pubkey>"},
+          {"mint": "<mint>", "amount": <float uiAmount>, "decimals": <int>, "account": "<token_acc>"},
           ...
         ]
+        Kompatibel lintas versi solana-py: gunakan encoding="jsonParsed".
         """
         try:
             owner = Pubkey.from_string(owner_address)
-
-            # In newer solana-py, TOKEN_PROGRAM_ID may be a PublicKey (not solders.Pubkey).
-            # Convert to string first, then back to solders.Pubkey for the RPC client.
             program_id = Pubkey.from_string(str(TOKEN_PROGRAM_ID))
 
-            # Use JSON-parsed to avoid manual unpacking of account data
-            resp = self.client.get_token_accounts_by_owner_json_parsed(
+            # JSON-parsed langsung dari RPC
+            resp = self.client.get_token_accounts_by_owner(
                 owner,
                 TokenAccountOpts(program_id=program_id),
+                encoding="jsonParsed",
             )
 
             balances = []
-            for item in resp.value or []:
+            value = getattr(resp, "value", None) or []
+            for item in value:
                 try:
-                    # json-parsed structure: item.account.data.parsed = {"type":"account","info":{...}}
-                    parsed = getattr(item.account.data, "parsed", None)
-                    if isinstance(parsed, dict):
-                        info = parsed.get("info") or {}
-                        token_amount = info.get("tokenAmount") or {}
-                        ui_amt = token_amount.get("uiAmount")
-                        decimals = token_amount.get("decimals")
-                        mint = info.get("mint")
-                        if mint is not None and ui_amt is not None:
-                            balances.append({
-                                "mint": str(mint),
-                                "amount": float(ui_amt) if ui_amt is not None else 0.0,
-                                "decimals": int(decimals) if decimals is not None else 0,
-                                "account": str(item.pubkey),
-                            })
+                    # item bisa object (RpcKeyedAccount) atau dict (tergantung versi)
+                    acc = getattr(item, "account", None) or (item.get("account") if isinstance(item, dict) else None)
+                    data = getattr(acc, "data", None) or (acc.get("data") if isinstance(acc, dict) else None)
+                    parsed = getattr(data, "parsed", None) or (data.get("parsed") if isinstance(data, dict) else None)
+                    info = parsed.get("info") if isinstance(parsed, dict) else None
+                    if not isinstance(info, dict):
+                        continue
+
+                    token_amount = info.get("tokenAmount") or {}
+                    ui_amt = token_amount.get("uiAmount")
+                    decimals = token_amount.get("decimals")
+                    mint = info.get("mint")
+
+                    pubkey = getattr(item, "pubkey", None) or (item.get("pubkey") if isinstance(item, dict) else None)
+
+                    if mint is not None and ui_amt is not None:
+                        balances.append({
+                            "mint": str(mint),
+                            "amount": float(ui_amt),
+                            "decimals": int(decimals) if decimals is not None else 0,
+                            "account": str(pubkey) if pubkey else "",
+                        })
                 except Exception:
-                    # Skip malformed/unsupported accounts
                     continue
 
             return balances
         except Exception as e:
             print(f"[get_spl_token_balances] error for {owner_address}: {e}")
             return []
-
+        
     def get_token_decimals(self, mint_address: str) -> int:
         """
-        Best-effort decimals fetch for a mint. Falls back to 6 if unavailable.
+        Ambil decimals mint; fallback 6 jika gagal.
         """
         try:
             mint = Pubkey.from_string(mint_address)
-            supply_resp = self.client.get_token_supply(mint)
-            # supply_resp.value.decimals exists in solana-py >= 0.28
-            return int(getattr(supply_resp.value, "decimals", 6))
+            supply = self.client.get_token_supply(mint)
+            dec = getattr(supply.value, "decimals", None)
+            return int(dec) if dec is not None else 6
         except Exception as e:
             print(f"[get_token_decimals] error for {mint_address}: {e}")
             return 6
