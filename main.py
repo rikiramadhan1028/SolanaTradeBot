@@ -7,22 +7,6 @@ from dotenv import load_dotenv
 import config
 import database
 import wallet_manager
-
-# --- Back buttons helpers ---
-from typing import Optional
-
-def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
-    """
-    Why: ensure every message has a way to go back.
-    If prev_cb is given -> show both '⬅️ Back' (prev) and '🏠 Menu'.
-    Else -> only '🏠 Menu'.
-    """
-    rows = []
-    if prev_cb:
-        rows.append(InlineKeyboardButton("⬅️ Back", callback_data=prev_cb))
-    rows.append(InlineKeyboardButton("🏠 Menu", callback_data="back_to_main_menu"))
-    return InlineKeyboardMarkup([rows])
-
 from blockchain_clients.solana_client import SolanaClient
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -42,6 +26,21 @@ from dex_integrations.price_aggregator import (
     get_token_price_from_raydium,
     get_token_price_from_pumpfun,
 )
+
+# --- Back buttons helpers ---
+from typing import Optional
+
+def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Why: ensure every message has a way to go back.
+    If prev_cb is given -> show both '⬅️ Back' (prev) and '🏠 Menu'.
+    Else -> only '🏠 Menu'.
+    """
+    rows = []
+    if prev_cb:
+        rows.append(InlineKeyboardButton("⬅️ Back", callback_data=prev_cb))
+    rows.append(InlineKeyboardButton("🏠 Menu", callback_data="back_to_main_menu"))
+    return InlineKeyboardMarkup([rows])
 
 # ================== Init ==================
 load_dotenv()
