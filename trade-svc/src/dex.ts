@@ -2,31 +2,39 @@
 import axios, { AxiosError } from 'axios';
 import https from 'node:https';
 import bs58 from 'bs58';
-import { Keypair, VersionedTransaction } from '@solana/web3.js';
+import {
+  Keypair,
+  VersionedTransaction,
+  PublicKey,
+  ParsedAccountData,
+} from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { cfg } from './config.js';
 import { conn, signFromBase64Unsigned, sendSignedVersionedTx } from './solana.js';
 
-type SwapParams = {
+export type SwapParams = {
   privateKey: string;
   inputMint: string;
   outputMint: string;
-  amountLamports: number;   // ExactIn: inAmount; ExactOut: outAmount
+  amountLamports: number;   // ExactIn: inAmount (raw units) ; ExactOut: outAmount (raw units)
   dex?: 'jupiter' | 'raydium';
   slippageBps?: number;
-  priorityFee?: number;     // SOL (heuristic → computeUnitPriceMicroLamports)
+  priorityFee?: number;     // SOL → heuristik computeUnitPriceMicroLamports
   exactOut?: boolean;       // if true → swapMode=ExactOut
+  forceLegacy?: boolean;    // if true → asLegacyTransaction
+  computeUnitPriceMicroLamports?: number; // override langsung
 };
 
 const httpsAgent = new https.Agent({ keepAlive: true, family: 4, maxSockets: 50 });
 
-// Prefer Pro when API key available, else Lite; both have same path
+// Jupiter Swap API v1 (Pro/Lite)
 const JUP_PRO  = 'https://api.jup.ag/swap/v1';
 const JUP_LITE = 'https://lite-api.jup.ag/swap/v1';
 const HAS_KEY  = !!process.env.JUP_API_KEY;
 
 function apiHeaders() {
-  return HAS_KEY ? { 'X-API-KEY': String(process.env.JUP_API_KEY), 'User-Agent': 'trade-svc/1.0' } :
-                   { 'User-Agent': 'trade-svc/1.0' };
+  return HAS_KEY ? { 'X-API-KEY': String(process.env.JUP_API_KEY), 'User-Agent': 'trade-svc/1.0' }
+                 : { 'User-Agent': 'trade-svc/1.0' };
 }
 
 function keyBytes(input: string): Uint8Array {
@@ -53,6 +61,7 @@ function mapAxiosErr(e: unknown): string {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// ---------- Helpers: Jupiter v1 ----------
 async function getQuote(params: URLSearchParams) {
   const bases = HAS_KEY ? [JUP_PRO, JUP_LITE] : [JUP_LITE, JUP_PRO];
   let lastErr = '';
@@ -89,22 +98,110 @@ async function buildSwapTx(body: any) {
   throw new Error(lastErr || 'swap_build_failed');
 }
 
+// ---------- Pre-checks untuk error "Attempt to debit..." ----------
+const NATIVE_SOL = 'So11111111111111111111111111111111111111112';
+const ATA_SIZE = 165;
+
+async function ensureSufficientBalances(opts: {
+  user: PublicKey;
+  inputMint: string;
+  outputMint: string;
+  amountRaw: number; // in raw units (lamports for SOL; token base units for SPL)
+}) {
+  const { user, inputMint, outputMint, amountRaw } = opts;
+  const c = conn(cfg.rpcUrl);
+
+  // SOL balance
+  const balLamports = await c.getBalance(user);
+
+  // Rent for ATA
+  const rentAta = await c.getMinimumBalanceForRentExemption(ATA_SIZE);
+
+  // Base required fees (rough safety margin)
+  let required = 10_000; // ~0.00001 SOL
+
+  // If input is SOL: need to fund WSOL temp account + amount
+  if (inputMint === NATIVE_SOL) {
+    required += amountRaw + rentAta;
+  }
+
+  // If output is SPL: ensure ATA exists; if not, add rent
+  if (outputMint !== NATIVE_SOL) {
+    try {
+      const outMint = new PublicKey(outputMint);
+      const ataOut = getAssociatedTokenAddressSync(outMint, user);
+      const info = await c.getAccountInfo(ataOut);
+      if (!info) required += rentAta;
+    } catch { /* ignore parsing errors */ }
+  }
+
+  if (balLamports < required) {
+    const need = (required - balLamports) / 1e9;
+    throw new Error(
+      `balance_low: need ~${(required/1e9).toFixed(6)} SOL, have ${(balLamports/1e9).toFixed(6)} SOL. ` +
+      `Top up at least ~${need.toFixed(6)} SOL (wrap WSOL/ATA/fees).`
+    );
+  }
+
+  // If selling SPL: ensure token balance >= amountRaw
+  if (inputMint !== NATIVE_SOL) {
+    try {
+      const mintPk = new PublicKey(inputMint);
+      const resp = await c.getParsedTokenAccountsByOwner(user, { mint: mintPk });
+      let totalRaw = 0n;
+      for (const acc of resp.value) {
+        const data = acc.account.data as ParsedAccountData;
+        const info = (data?.parsed as any)?.info;
+        const amtStr = info?.tokenAmount?.amount ?? '0';
+        totalRaw += BigInt(amtStr);
+      }
+      if (totalRaw < BigInt(amountRaw)) {
+        throw new Error(
+          `token_balance_low: have ${totalRaw.toString()} raw, need ${amountRaw} raw for input mint ${inputMint}`
+        );
+      }
+    } catch (e) {
+      // If fails to fetch, skip strict check; Jupiter sim will still catch it.
+    }
+  }
+}
+
+// ---------- Main swap ----------
 export async function dexSwap(p: SwapParams): Promise<string> {
   const {
-    privateKey, inputMint, outputMint, amountLamports,
-    dex = 'jupiter', slippageBps = 50, priorityFee = 0, exactOut = false
+    privateKey,
+    inputMint,
+    outputMint,
+    amountLamports,
+    dex = 'jupiter',
+    slippageBps = 50,
+    priorityFee = 0,
+    exactOut = false,
+    forceLegacy = false,
+    computeUnitPriceMicroLamports: computeOverride,
   } = p;
 
   if (!privateKey || !inputMint || !outputMint || !amountLamports) {
     throw new Error('missing fields');
   }
 
-  const onlyDirectRoutes = dex === 'raydium';   // force 1-market route via Jupiter
+  const onlyDirectRoutes = dex === 'raydium'; // force single-market via Jupiter router
   const swapMode = exactOut ? 'ExactOut' : 'ExactIn';
 
-  // Heuristic compute price (micro lamports / CU) dari priorityFee (SOL)
+  const user = Keypair.fromSecretKey(keyBytes(privateKey));
+
+  // Pre-check to avoid "Attempt to debit..." with clear message
+  await ensureSufficientBalances({
+    user: user.publicKey,
+    inputMint,
+    outputMint,
+    amountRaw: amountLamports,
+  });
+
+  // Heuristic compute price (micro lamports/CU) dari priorityFee (SOL) jika override tidak diberikan
   const computeUnitPriceMicroLamports =
-    priorityFee > 0 ? Math.max(1, Math.floor((priorityFee * 1_000_000_000) / 1_000_000)) : undefined;
+    computeOverride ??
+    (priorityFee > 0 ? Math.max(1, Math.floor((priorityFee * 1_000_000_000) / 1_000_000)) : undefined);
 
   // Retry 3x utk network/5xx/429
   let lastErr = '';
@@ -118,33 +215,34 @@ export async function dexSwap(p: SwapParams): Promise<string> {
         slippageBps: String(slippageBps),
         onlyDirectRoutes: String(onlyDirectRoutes),
         restrictIntermediateTokens: 'true',
-        swapMode, // 'ExactIn'|'ExactOut'
+        swapMode, // 'ExactIn' | 'ExactOut'
       });
       const quote = await getQuote(qs);
 
       // 2) Build unsigned tx (base64)
-      const user = Keypair.fromSecretKey(keyBytes(privateKey));
       const txB64 = await buildSwapTx({
         quoteResponse: quote,
         userPublicKey: user.publicKey.toBase58(),
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
         computeUnitPriceMicroLamports,
-        // dynamicSlippage: true, // aktifkan jika ingin
+        asLegacyTransaction: !!forceLegacy,
+        // dynamicSlippage: true, // enable if you want Jupiter to tweak slippage
       });
 
       const vtx: VersionedTransaction = signFromBase64Unsigned(txB64, user);
 
-      // 3) Optional simulate → error lebih jelas
+      // 3) Optional simulate → surface errors early
       try {
         const c = conn(cfg.rpcUrl);
         const sim = await c.simulateTransaction(vtx, { sigVerify: false, replaceRecentBlockhash: true });
         if (sim.value.err) {
-          const logs = (sim.value.logs ?? []).slice(-8).join(' | ');
+          const logs = (sim.value.logs ?? []).slice(-10).join(' | ');
           throw new Error(`simulation_failed ${JSON.stringify(sim.value.err)} logs=${logs}`);
         }
-      } catch (simErr) {
-        // bisa di-uncomment untuk hard fail: throw simErr;
+      } catch {
+        // uncomment next line to hard-fail on simulation error:
+        // throw simErr;
       }
 
       // 4) Send
@@ -153,6 +251,7 @@ export async function dexSwap(p: SwapParams): Promise<string> {
 
     } catch (e) {
       lastErr = mapAxiosErr(e);
+      // retry only for transient issues
       if (!/network_error|HTTP 5\d\d|429/.test(lastErr) || attempt === 2) {
         throw new Error(lastErr);
       }
