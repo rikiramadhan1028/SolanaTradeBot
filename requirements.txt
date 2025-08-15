@@ -6,3 +6,4 @@ httpx
 solders
 base58
 pytest
+pymongo

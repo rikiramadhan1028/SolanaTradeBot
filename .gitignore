@@ -12,6 +12,7 @@ ENV/
 .venv/
 .idea/
 .vscode/
+node_modules
 
 # ⛔ OS files
 .DS_Store
