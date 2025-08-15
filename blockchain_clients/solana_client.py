@@ -40,16 +40,14 @@ class SolanaClient:
     def __init__(self, rpc_url: str):
         self.client = Client(rpc_url)
 
-    # --- compat helper: solders API beda versi ---
+    # --- compat helper: beda versi solders ---
     @staticmethod
     def _vtx_from_bytes(buf: bytes) -> VersionedTransaction:
         """Deserialize VersionedTransaction across solders versions."""
         try:
-            # solders modern
-            return VersionedTransaction.from_bytes(buf)
+            return VersionedTransaction.from_bytes(buf)  # modern
         except AttributeError:
-            # solders lama
-            return VersionedTransaction.deserialize(buf)  # type: ignore[attr-defined]
+            return VersionedTransaction.deserialize(buf)  # lama  # type: ignore[attr-defined]
 
     def get_balance(self, public_key_str: str) -> float:
         try:
@@ -109,8 +107,8 @@ class SolanaClient:
                 return "Error: Unsupported DEX."
 
             raw_tx = base64.b64decode(swap_transaction_b64)
-            tx = self._vtx_from_bytes(raw_tx)
-            tx.sign([keypair])
+            unsigned = self._vtx_from_bytes(raw_tx)
+            tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
             sig_resp = self.client.send_raw_transaction(
                 tx.serialize(),
@@ -139,8 +137,8 @@ class SolanaClient:
                 return "Error: Could not build Pumpfun transaction."
 
             tx_bytes = base64.b64decode(tx_b64)
-            tx = self._vtx_from_bytes(tx_bytes)
-            tx.sign([keypair])
+            unsigned = self._vtx_from_bytes(tx_bytes)
+            tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
             sig_resp = self.client.send_raw_transaction(
                 tx.serialize(),
@@ -164,9 +162,7 @@ class SolanaClient:
         *,
         bundle_count: int = 1,
     ) -> str:
-        """
-        Build bundle via trade-local (array), sign locally, lalu kirim ke Jito sendBundle.
-        """
+        """Build bundle via trade-local (array), sign locally, lalu kirim ke Jito sendBundle."""
         try:
             if bundle_count < 1:
                 bundle_count = 1
@@ -189,10 +185,9 @@ class SolanaClient:
             signed_b58_list = []
             signatures = []
             for enc in unsigned_base58_list:
-                vtx = self._vtx_from_bytes(bytes(base58.b58decode(enc)))
-                vtx.sign([keypair])
+                unsigned = self._vtx_from_bytes(bytes(base58.b58decode(enc)))
+                vtx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
                 signed_b58_list.append(base58.b58encode(vtx.serialize()).decode())
-                # pastikan cast ke bytes sebelum encode
                 signatures.append(base58.b58encode(bytes(vtx.signatures[0])).decode())
 
             # Kirim ke Jito Block Engine
@@ -250,7 +245,7 @@ class SolanaClient:
                 recent_blockhash=latest_blockhash,
                 address_lookup_table_accounts=[],
             )
-            tx = VersionedTransaction(msg, [sender_keypair])
+            tx = VersionedTransaction(msg, [sender_keypair])  # signed
 
             result = self.client.send_raw_transaction(
                 tx.serialize(),
@@ -278,7 +273,6 @@ class SolanaClient:
             recipient_ata = get_associated_token_address(recipient, mint)
             latest_blockhash = self.client.get_latest_blockhash().value.blockhash
 
-            # decimals dari mint → akurat
             try:
                 supply_resp = self.client.get_token_supply(mint)
                 decimals = supply_resp.value.decimals
@@ -288,21 +282,12 @@ class SolanaClient:
             token_amount = int(amount * (10 ** decimals))
 
             ixs = []
-            # Pastikan ATA penerima ada
             try:
                 acc = self.client.get_account_info(recipient_ata)
                 if acc.value is None:
-                    ixs.append(
-                        create_associated_token_account(
-                            payer=sender_pubkey, owner=recipient, mint=mint
-                        )
-                    )
+                    ixs.append(create_associated_token_account(payer=sender_pubkey, owner=recipient, mint=mint))
             except Exception:
-                ixs.append(
-                    create_associated_token_account(
-                        payer=sender_pubkey, owner=recipient, mint=mint
-                    )
-                )
+                ixs.append(create_associated_token_account(payer=sender_pubkey, owner=recipient, mint=mint))
 
             ixs.append(
                 transfer_checked(
@@ -322,7 +307,7 @@ class SolanaClient:
                 recent_blockhash=latest_blockhash,
                 address_lookup_table_accounts=[],
             )
-            tx = VersionedTransaction(msg, [sender_keypair])
+            tx = VersionedTransaction(msg, [sender_keypair])  # signed
 
             result = self.client.send_raw_transaction(
                 tx.serialize(),
