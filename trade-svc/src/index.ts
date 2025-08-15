@@ -118,7 +118,9 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
   }
 });
 
+// trade-svc/src/index.ts  (change the last line)
 (async () => {
-  await connectDb(); // no-op if no MONGO_URL
-  app.listen(cfg.port, () => console.log(`trade-svc running on :${cfg.port}`));
+  await connectDb();
+  app.listen(cfg.port, '0.0.0.0', () => console.log(`trade-svc running on :${cfg.port}`));
 })();
+

@@ -569,48 +569,79 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
     message = update.message if update.message else update.callback_query.message
+
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
-    if not wallet or not wallet["private_key"]:
+    if not wallet or not wallet.get("private_key"):
         await message.reply_text("❌ No Solana wallet found. Please create or import one first.")
         return
 
-    trade_type = context.user_data.get("trade_type")
-    amount_type = context.user_data.get("amount_type")
+    trade_type = (context.user_data.get("trade_type") or "").lower()
+    amount_type = (context.user_data.get("amount_type") or "").lower()
     token_address = context.user_data.get("token_address")
-    dex = context.user_data.get("selected_dex", "jupiter")
+    dex = (context.user_data.get("selected_dex") or "jupiter").lower()
+
+    # Guard: mint harus ada
+    if not token_address:
+        await message.reply_text(
+            "❌ No token mint in context. Please tap Buy/Sell, paste the token address, then choose a DEX."
+        )
+        return
+
+    # Helper: decimals fallback (repo belum expose util ini)
+    def _decimals_or_default(mint: str, default: int = 6) -> int:
+        try:
+            # if your SolanaClient exposes get_token_decimals
+            if hasattr(solana_client, "get_token_decimals"):
+                d = solana_client.get_token_decimals(mint)  # type: ignore[attr-defined]
+                if isinstance(d, int) and 0 <= d <= 18:
+                    return d
+        except Exception:
+            pass
+        return default
 
     if trade_type == "buy":
         input_mint = SOLANA_NATIVE_TOKEN_MINT
         output_mint = token_address
+        # SOL -> lamports
         amount_lamports = int(float(amount) * 1_000_000_000)
     else:
+        # SELL path
+        input_mint = token_address
+        output_mint = SOLANA_NATIVE_TOKEN_MINT
+
         if amount_type == "percentage":
-            # NOTE: assumes your solana_client implements this as in your repo
+            # Ambil balance token (dlm unit token), konversi ke base units pakai decimals (fallback 6)
+            decimals = _decimals_or_default(token_address, 6)
             spl_tokens = solana_client.get_spl_token_balances(wallet["address"])
             token_balance = next((t["amount"] for t in spl_tokens if t["mint"] == token_address), 0)
             if token_balance <= 0:
                 await message.reply_text(f"❌ Insufficient balance for token `{token_address}`.")
                 return
-            amount_to_sell = token_balance * (amount / 100.0)
-            amount_lamports = int(amount_to_sell * 1_000_000)  # assumes 6 decimals
+            amount_to_sell = float(token_balance) * (float(amount) / 100.0)
+            amount_lamports = int(amount_to_sell * (10 ** decimals))
         else:
-            amount_lamports = int(float(amount) * 1_000_000)
+            # Jika user memasukkan jumlah token langsung, konversi ke base units
+            decimals = _decimals_or_default(token_address, 6)
+            amount_lamports = int(float(amount) * (10 ** decimals))
 
-        input_mint = token_address
-        output_mint = SOLANA_NATIVE_TOKEN_MINT
+    dex_label = "Raydium (via Jupiter direct route)" if dex == "raydium" else "Jupiter"
+    await message.reply_text(f"⏳ Performing {trade_type} on `{token_address}` via {dex_label} ...")
 
-    await message.reply_text(f"⏳ Performing {trade_type} on `{token_address}` via {dex.capitalize()} ...")
-
-    res = await dex_swap(
-        private_key=wallet["private_key"],
-        input_mint=input_mint,
-        output_mint=output_mint,
-        amount_lamports=amount_lamports,
-        dex=dex,
-        slippage_bps=50,
-        priority_fee_sol=0.0,
-    )
+    try:
+        res = await dex_swap(
+            private_key=wallet["private_key"],
+            input_mint=input_mint,
+            output_mint=output_mint,
+            amount_lamports=amount_lamports,
+            dex=dex,
+            slippage_bps=50,
+            priority_fee_sol=0.0,
+        )
+    except Exception as e:
+        await message.reply_text(f"❌ Swap failed: {e}")
+        clear_user_context(context)
+        return ConversationHandler.END
 
     if isinstance(res, dict) and res.get("signature"):
         await message.reply_text(
@@ -618,14 +649,18 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             disable_web_page_preview=True,
         )
     else:
-        await message.reply_text(f"❌ Swap failed: {res.get('error') if isinstance(res, dict) else res}")
+        err = res.get("error") if isinstance(res, dict) else res
+        await message.reply_text(f"❌ Swap failed: {err}")
 
     clear_user_context(context)
     await message.reply_text(
         "Done! What's next?",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]
+        ),
     )
     return ConversationHandler.END
+
 
 
 async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
