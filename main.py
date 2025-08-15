@@ -127,7 +127,12 @@ def dexscreener_url(mint: str) -> str:
 async def get_dexscreener_stats(mint: str) -> dict:
     """
     Fetch latest price/FDV/liquidity from Dexscreener for a token.
-    Returns { priceUsd, fdvUsd, liquidityUsd } (strings or numbers) or empty dict on error.
+    Returns:
+      {
+        priceUsd, fdvUsd, liquidityUsd,
+        name, symbol
+      }
+    or {} on error.
     """
     url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
     try:
@@ -138,13 +143,16 @@ async def get_dexscreener_stats(mint: str) -> dict:
             pairs = (data or {}).get("pairs") or []
             if not pairs:
                 return {}
-            # Pick highest liquidity pair
+            # pick highest-liquidity pair
             pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
             p0 = pairs[0]
+            base = p0.get("baseToken") or {}
             return {
                 "priceUsd": p0.get("priceUsd"),
                 "fdvUsd": p0.get("fdv"),
                 "liquidityUsd": (p0.get("liquidity") or {}).get("usd"),
+                "name": base.get("name"),
+                "symbol": base.get("symbol"),
             }
     except Exception:
         return {}
@@ -272,6 +280,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
     ])
     return InlineKeyboardMarkup(kb)
 
+# --- REPLACE this function ---
 async def build_token_panel(user_id: int, mint: str) -> str:
     """Compact summary like screenshot. Unknown fields show as N/A."""
     wallet_info = database.get_user_wallet(user_id)
@@ -286,13 +295,22 @@ async def build_token_panel(user_id: int, mint: str) -> str:
         except Exception:
             balance_text = "Error"
 
-    # Price: Dexscreener first, fallback to aggregator(s)
+    # Price + meta: Dexscreener first, then fallbacks
     price_text = "N/A"
     mc_text = "N/A"
     lp_text = "N/A"
+    display_name = None  # will show "$SYMBOL" or Name
 
     ds = await get_dexscreener_stats(mint)
     if ds:
+        # header display
+        symbol = (ds.get("symbol") or "") or ""
+        name = (ds.get("name") or "") or ""
+        if symbol:
+            display_name = symbol if symbol.startswith("$") else f"${symbol}"
+        elif name:
+            display_name = name
+
         price_text = format_usd(ds.get("priceUsd") or 0)
         mc_text = format_usd(ds.get("fdvUsd") or 0)
         lp_text = format_usd(ds.get("liquidityUsd") or 0)
@@ -303,17 +321,20 @@ async def build_token_panel(user_id: int, mint: str) -> str:
         if price_data["price"] <= 0:
             price_data = await get_token_price_from_pumpfun(mint)
         price_text = format_usd(price_data.get("price") or 0)
-        # mc may be N/A in your aggregator
         mc_val = price_data.get("mc")
         mc_text = format_usd(mc_val if isinstance(mc_val, (int, float)) else 0)
+
+    # fallback display when name/symbol not found
+    if not display_name:
+        display_name = f"{mint[:4]}…{mint[-4:]}"  # short address
 
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]  # 13:36:26.586
 
     # HTML panel
     lines = []
-    lines.append(f"Swap <b>{mint[:4]}…</b> 📈")
+    lines.append(f"Swap <b>{display_name}</b> 📈")
     lines.append("")
-    lines.append(f"<code>{mint}</code>")
+    lines.append(f"<a href=\"{dexscreener_url(mint)}\">{mint[:4]}…{mint[-4:]}</a>")
     lines.append(f"• SOL Balance: {balance_text}")
     lines.append(f"• Price: {price_text}  LP: {lp_text}  MC: {mc_text}")
     lines.append("• Raydium CPMM")
