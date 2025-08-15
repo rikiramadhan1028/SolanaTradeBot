@@ -19,7 +19,14 @@ import { sendBundleToJito } from './jito.js';
 import { dexSwap } from './dex.js';
 import bs58 from 'bs58';
 
-const JUP_BASE = 'https://quote-api.jup.ag/v6';
+// ---- Jupiter Swap API v1 (Pro/Lite) ----
+const JUP_QUOTE_PRO  = 'https://api.jup.ag/swap/v1/quote';
+const JUP_QUOTE_LITE = 'https://lite-api.jup.ag/swap/v1/quote';
+const HAS_JUP_KEY    = !!process.env.JUP_API_KEY;
+const jupHeaders = HAS_JUP_KEY
+  ? { 'X-API-KEY': String(process.env.JUP_API_KEY), 'User-Agent': 'trade-svc/1.0' }
+  : { 'User-Agent': 'trade-svc/1.0' };
+
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, family: 4 });
 
 const app = express();
@@ -41,8 +48,11 @@ app.get('/diag/ping', async (_req: Request, res: Response) => {
 
 app.get('/diag/jup', async (_req: Request, res: Response) => {
   try {
-    const a = await dns.lookup('quote-api.jup.ag', { all: true, verbatim: true });
-    return res.json({ dns: a });
+    // cek keduanya
+    const lite = await dns.lookup('lite-api.jup.ag', { all: true, verbatim: true });
+    let pro: unknown = null;
+    try { pro = await dns.lookup('api.jup.ag', { all: true, verbatim: true }); } catch {}
+    return res.json({ lite, pro });
   } catch (e: any) {
     return res.status(500).json({ error: String(e?.message || e) });
   }
@@ -52,6 +62,7 @@ app.get('/diag/jup', async (_req: Request, res: Response) => {
  * GET /diag/quote?input=<mint>&output=<mint>&amount=<lamports>&direct=1
  * - direct=1/true -> onlyDirectRoutes=true (Raydium-direct)
  * - amount in lamports (integer > 0)
+ * - sumber: Jupiter Swap API v1 (Pro/Lite fallback)
  */
 app.get('/diag/quote', async (req: Request, res: Response) => {
   try {
@@ -76,17 +87,32 @@ app.get('/diag/quote', async (req: Request, res: Response) => {
       slippageBps: '50',
       onlyDirectRoutes: String(onlyDirectRoutes),
       restrictIntermediateTokens: 'true',
-    });
+      swapMode: 'ExactIn',
+    }).toString();
 
-    const url = `${JUP_BASE}/quote?${qs.toString()}`;
-    const r = await axios.get(url, {
-      httpsAgent,
-      timeout: 12000,
-      validateStatus: () => true,
-      headers: { 'User-Agent': 'trade-svc/1.0' },
-    });
+    // Prefer Pro jika ada key, lalu fallback ke Lite (atau sebaliknya jika tanpa key)
+    const bases = HAS_JUP_KEY ? [JUP_QUOTE_PRO, JUP_QUOTE_LITE] : [JUP_QUOTE_LITE, JUP_QUOTE_PRO];
+    let lastStatus = 500;
+    let lastBody: any = { error: 'quote_failed' };
 
-    return res.status(r.status).json(r.data);
+    for (const base of bases) {
+      const url = `${base}?${qs}`;
+      try {
+        const r = await axios.get(url, {
+          httpsAgent,
+          timeout: 12000,
+          validateStatus: () => true,
+          headers: jupHeaders,
+        });
+        if (r.status === 200) return res.json(r.data);
+        lastStatus = r.status;
+        lastBody = r.data;
+      } catch (e: any) {
+        lastStatus = 599;
+        lastBody = { error: e?.message || String(e) };
+      }
+    }
+    return res.status(lastStatus).json(lastBody);
   } catch (e: any) {
     const msg = e?.response
       ? `HTTP ${e.response.status} ${JSON.stringify(e.response.data).slice(0, 300)}`
@@ -178,8 +204,8 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
     if (useJito) {
       const arr = await tradeLocalBundle(
         Array.from({ length: Math.max(1, Number(bundleCount)) }).map((_, i) => ({
-          publicKey, // Already a string
-          action: String(action).toLowerCase() as PumpAction, // Explicitly cast to PumpAction
+          publicKey,
+          action: String(action).toLowerCase() as PumpAction,
           mint,
           amount,
           slippage: Number(slippage),
