@@ -7,3 +7,4 @@ solders
 base58
 pytest
 pymongo
+cryptography

@@ -395,3 +395,66 @@ class SolanaClient:
             return str(sig) if sig else f"Error: RPC returned no signature: {resp}"
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
+
+    def get_spl_token_balances(self, owner_address: str):
+        """
+        Return a list of SPL token balances for the owner.
+
+        Output format:
+        [
+          {"mint": "<mint>", "amount": <float uiAmount>, "decimals": <int>, "account": "<token_account_pubkey>"},
+          ...
+        ]
+        """
+        try:
+            owner = Pubkey.from_string(owner_address)
+
+            # In newer solana-py, TOKEN_PROGRAM_ID may be a PublicKey (not solders.Pubkey).
+            # Convert to string first, then back to solders.Pubkey for the RPC client.
+            program_id = Pubkey.from_string(str(TOKEN_PROGRAM_ID))
+
+            # Use JSON-parsed to avoid manual unpacking of account data
+            resp = self.client.get_token_accounts_by_owner_json_parsed(
+                owner,
+                TokenAccountOpts(program_id=program_id),
+            )
+
+            balances = []
+            for item in resp.value or []:
+                try:
+                    # json-parsed structure: item.account.data.parsed = {"type":"account","info":{...}}
+                    parsed = getattr(item.account.data, "parsed", None)
+                    if isinstance(parsed, dict):
+                        info = parsed.get("info") or {}
+                        token_amount = info.get("tokenAmount") or {}
+                        ui_amt = token_amount.get("uiAmount")
+                        decimals = token_amount.get("decimals")
+                        mint = info.get("mint")
+                        if mint is not None and ui_amt is not None:
+                            balances.append({
+                                "mint": str(mint),
+                                "amount": float(ui_amt) if ui_amt is not None else 0.0,
+                                "decimals": int(decimals) if decimals is not None else 0,
+                                "account": str(item.pubkey),
+                            })
+                except Exception:
+                    # Skip malformed/unsupported accounts
+                    continue
+
+            return balances
+        except Exception as e:
+            print(f"[get_spl_token_balances] error for {owner_address}: {e}")
+            return []
+
+    def get_token_decimals(self, mint_address: str) -> int:
+        """
+        Best-effort decimals fetch for a mint. Falls back to 6 if unavailable.
+        """
+        try:
+            mint = Pubkey.from_string(mint_address)
+            supply_resp = self.client.get_token_supply(mint)
+            # supply_resp.value.decimals exists in solana-py >= 0.28
+            return int(getattr(supply_resp.value, "decimals", 6))
+        except Exception as e:
+            print(f"[get_token_decimals] error for {mint_address}: {e}")
+            return 6
