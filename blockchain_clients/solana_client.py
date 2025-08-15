@@ -40,25 +40,36 @@ class SolanaClient:
     def __init__(self, rpc_url: str):
         self.client = Client(rpc_url)
 
-    # --- Compat helpers untuk berbagai versi "solders" ---
+    # ---------- Helpers kompatibilitas & error ----------
     @staticmethod
     def _vtx_from_bytes(buf: bytes) -> VersionedTransaction:
-        """Deserialize VersionedTransaction: prefer from_bytes(), fallback deserialize()."""
         try:
-            return VersionedTransaction.from_bytes(buf)  # solders modern
+            return VersionedTransaction.from_bytes(buf)       # solders modern
         except AttributeError:
-            return VersionedTransaction.deserialize(buf)  # type: ignore[attr-defined]
+            return VersionedTransaction.deserialize(buf)       # solders lama  # type: ignore[attr-defined]
 
     @staticmethod
     def _tx_bytes(tx: VersionedTransaction) -> bytes:
-        """Serialize VersionedTransaction: prefer to_bytes(), fallback serialize()/bytes()."""
         try:
-            return tx.to_bytes()  # solders modern
+            return tx.to_bytes()                               # solders modern
         except AttributeError:
             try:
-                return tx.serialize()  # type: ignore[attr-defined]
+                return tx.serialize()                          # solders lama   # type: ignore[attr-defined]
             except AttributeError:
                 return bytes(tx)
+
+    @staticmethod
+    def _format_exc(e: Exception) -> str:
+        # Why: beberapa exception dari solana lib kosong; gunakan args/repr agar informatif.
+        msg = str(e)
+        if not msg and getattr(e, "args", None):
+            try:
+                msg = json.dumps(e.args[0], ensure_ascii=False)
+            except Exception:
+                msg = repr(e.args[0])
+        if not msg:
+            msg = f"{e.__class__.__name__}"
+        return msg
 
     def get_balance(self, public_key_str: str) -> float:
         try:
@@ -87,6 +98,7 @@ class SolanaClient:
         except Exception as e:
             raise ValueError(f"Invalid private key format: {e}")
 
+    # ---------- Jupiter/Raydium generic swap ----------
     async def perform_swap(
         self,
         sender_private_key_json: str,
@@ -120,19 +132,27 @@ class SolanaClient:
             unsigned = self._vtx_from_bytes(raw_tx)
             tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
-            sig_resp = self.client.send_raw_transaction(
-                self._tx_bytes(tx),
-                opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
-            )
             try:
-                self.client.confirm_transaction(sig_resp.value, commitment="confirmed")
+                resp = self.client.send_raw_transaction(
+                    self._tx_bytes(tx),
+                    opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
+                )
+            except Exception as e:
+                return f"Error: {self._format_exc(e)}"
+
+            sig = getattr(resp, "value", None)
+            if not sig:
+                return f"Error: RPC returned no signature: {resp}"
+            # optional confirm
+            try:
+                self.client.confirm_transaction(sig, commitment="confirmed")
             except Exception:
                 pass
-            return str(sig_resp.value)
+            return str(sig)
         except Exception as e:
-            print(f"Swap error details: {e}")
-            return f"Error: {e}"
+            return f"Error: {self._format_exc(e)}"
 
+    # ---------- Pumpfun local signing ----------
     async def perform_pumpfun_swap(
         self, sender_private_key_json: str, amount, action: str, mint: str
     ) -> str:
@@ -144,25 +164,32 @@ class SolanaClient:
                 public_key_str, action, mint, amount, slippage=10, priority_fee=0.00001, pool="auto"
             )
             if not tx_b64:
-                return "Error: Could not build Pumpfun transaction."
+                return "Error: Could not build Pumpfun transaction (empty response)."
 
             tx_bytes = base64.b64decode(tx_b64)
             unsigned = self._vtx_from_bytes(tx_bytes)
             tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
-            sig_resp = self.client.send_raw_transaction(
-                self._tx_bytes(tx),
-                opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
-            )
             try:
-                self.client.confirm_transaction(sig_resp.value, commitment="confirmed")
+                resp = self.client.send_raw_transaction(
+                    self._tx_bytes(tx),
+                    opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
+                )
+            except Exception as e:
+                return f"Error: {self._format_exc(e)}"
+
+            sig = getattr(resp, "value", None)
+            if not sig:
+                return f"Error: RPC returned no signature: {resp}"
+            try:
+                self.client.confirm_transaction(sig, commitment="confirmed")
             except Exception:
                 pass
-            return str(sig_resp.value)
+            return str(sig)
         except Exception as e:
-            print(f"Pumpfun Swap error details: {e}")
-            return f"Error: {e}"
+            return f"Error: {self._format_exc(e)}"
 
+    # ---------- Pumpfun Jito bundle ----------
     async def perform_pumpfun_jito_bundle(
         self,
         sender_private_key_json: str,
@@ -189,33 +216,36 @@ class SolanaClient:
                 pool="auto",
             )
             if not unsigned_base58_list:
-                return "Error: Could not build Pumpfun bundle."
+                return "Error: Could not build Pumpfun bundle (empty response)."
 
-            # Sign semua tx & encode base58 serialized bytes
             signed_b58_list = []
             signatures = []
             for enc in unsigned_base58_list:
                 unsigned = self._vtx_from_bytes(bytes(base58.b58decode(enc)))
-                vtx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
+                vtx = VersionedTransaction(unsigned.message, [keypair])  # signed
                 signed_b58_list.append(base58.b58encode(self._tx_bytes(vtx)).decode())
                 signatures.append(str(vtx.signatures[0]))
 
-            # Kirim ke Jito Block Engine
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "sendBundle",
                 "params": [signed_b58_list],
             }
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                jr = await client.post(JITO_BUNDLE_ENDPOINT, json=payload)
-                jr.raise_for_status()
-                return signatures[0] if signatures else "OK"
-        except httpx.HTTPStatusError as e:
-            return f"Error: Jito sendBundle failed {e.response.status_code}: {e.response.text}"
-        except Exception as e:
-            return f"Error: {e}"
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    jr = await client.post(JITO_BUNDLE_ENDPOINT, json=payload)
+                    jr.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                return f"Error: Jito sendBundle failed {e.response.status_code}: {e.response.text}"
+            except Exception as e:
+                return f"Error: {self._format_exc(e)}"
 
+            return signatures[0] if signatures else "OK"
+        except Exception as e:
+            return f"Error: {self._format_exc(e)}"
+
+    # ---------- Misc ----------
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
             keypair = self._get_keypair_from_private_key(private_key_json)
@@ -255,19 +285,20 @@ class SolanaClient:
                 recent_blockhash=latest_blockhash,
                 address_lookup_table_accounts=[],
             )
-            tx = VersionedTransaction(msg, [sender_keypair])  # already signed
+            tx = VersionedTransaction(msg, [sender_keypair])  # signed
 
-            result = self.client.send_raw_transaction(
-                self._tx_bytes(tx),
-                opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
-            )
-            if result.value:
-                return f"Transaction successful! Signature: {result.value}"
-            else:
-                return "Error: Transaction failed to process"
+            try:
+                resp = self.client.send_raw_transaction(
+                    self._tx_bytes(tx),
+                    opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
+                )
+            except Exception as e:
+                return f"Error: {self._format_exc(e)}"
+
+            sig = getattr(resp, "value", None)
+            return str(sig) if sig else f"Error: RPC returned no signature: {resp}"
         except Exception as e:
-            print(f"Error sending SOL: {e}")
-            return f"Error: {e}"
+            return f"Error: {self._format_exc(e)}"
 
     def send_spl_token(
         self, private_key_base58: str, token_mint_address: str, to_wallet_address: str, amount: float
@@ -317,13 +348,17 @@ class SolanaClient:
                 recent_blockhash=latest_blockhash,
                 address_lookup_table_accounts=[],
             )
-            tx = VersionedTransaction(msg, [sender_keypair])  # already signed
+            tx = VersionedTransaction(msg, [sender_keypair])  # signed
 
-            result = self.client.send_raw_transaction(
-                self._tx_bytes(tx),
-                opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
-            )
-            return str(result.value)
+            try:
+                resp = self.client.send_raw_transaction(
+                    self._tx_bytes(tx),
+                    opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
+                )
+            except Exception as e:
+                return f"Error: {self._format_exc(e)}"
+
+            sig = getattr(resp, "value", None)
+            return str(sig) if sig else f"Error: RPC returned no signature: {resp}"
         except Exception as e:
-            print(f"Error sending SPL Token: {e}")
-            return f"Error: {e}"
+            return f"Error: {self._format_exc(e)}"
