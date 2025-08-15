@@ -30,7 +30,8 @@ SOLANA_NATIVE_TOKEN_MINT = "So11111111111111111111111111111111111111112"
 solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
 # === States untuk ConversationHandler ===
-AWAITING_TOKEN_ADDRESS, AWAITING_TRADE_ACTION, AWAITING_AMOUNT, PUMPFUN_AWAITING_TOKEN = range(4)
+AWAITING_TOKEN_ADDRESS, AWAITING_TRADE_ACTION, AWAITING_AMOUNT, \
+PUMPFUN_AWAITING_TOKEN, PUMPFUN_AWAITING_ACTION, PUMPFUN_AWAITING_AMOUNT = range(6)
 
 # === Fungsi helper untuk membersihkan context ===
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
@@ -624,24 +625,27 @@ async def handle_back_to_dex_selection(update: Update, context: ContextTypes.DEF
 # =========================
 
 async def handle_pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # JANGAN clear_user_context di sini agar flow tetap menyimpan state selanjutnya
+    # HAPUS baris ini: clear_user_context(context)
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]]
     await query.edit_message_text(
         "🤖 **Pumpfun Auto Trade**\n\n"
         "Please send the **token contract (mint) address** you want to auto trade.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="back_to_main_menu")]])
     )
+    # Set flag flow, biar jelas ini jalur pumpfun
+    context.user_data['pf_flow'] = True
     return PUMPFUN_AWAITING_TOKEN
 
 async def handle_pumpfun_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    token_address = (update.message.text or "").strip()
+    token_address = (update.message.text or '').strip()
     if len(token_address) < 32 or len(token_address) > 44:
         await update.message.reply_text("❌ Invalid token address format. Please enter a valid Solana token address.")
         return PUMPFUN_AWAITING_TOKEN
-    context.user_data["pf_mint"] = token_address
+
+    context.user_data['pf_mint'] = token_address
     kb = [
         [InlineKeyboardButton("🟢 Buy (Local)", callback_data="pf_buy"),
          InlineKeyboardButton("🔴 Sell (Local)", callback_data="pf_sell")],
@@ -651,27 +655,27 @@ async def handle_pumpfun_token_input(update: Update, context: ContextTypes.DEFAU
     ]
     await update.message.reply_text(
         f"Mint: `{token_address}`\nPilih aksi:",
-        parse_mode="Markdown",
+        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(kb),
     )
-    return AWAITING_TRADE_ACTION
+    return PUMPFUN_AWAITING_ACTION
+
 
 async def handle_pumpfun_action_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     data = query.data
-    context.user_data["pf_action"] = "buy" if "buy" in data else "sell"
-    context.user_data["pf_jito"] = data.endswith("_jito")
-    if context.user_data["pf_action"] == "buy":
-        text = "Masukkan **jumlah SOL** untuk BUY (mis. `0.01`):"
-    else:
-        text = "Masukkan **jumlah token** untuk SELL (mis. `1000`) atau **persen** (mis. `100%`):"
+    context.user_data['pf_action'] = 'buy' if 'buy' in data else 'sell'
+    context.user_data['pf_jito'] = data.endswith('_jito')
+
+    prompt = "Masukkan **jumlah SOL** untuk BUY (mis. `0.01`):" if context.user_data['pf_action'] == 'buy' \
+             else "Masukkan **jumlah token** untuk SELL (mis. `1000`) atau **persen** (mis. `100%`):"
     await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="back_to_main_menu")]]),
+        prompt, parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="back_to_main_menu")]])
     )
-    return AWAITING_AMOUNT
+    return PUMPFUN_AWAITING_AMOUNT
+
 
 async def handle_pumpfun_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -680,25 +684,27 @@ async def handle_pumpfun_amount_input(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("❌ No Solana wallet found. Please create or import one first.")
         return ConversationHandler.END
 
-    amt_str = (update.message.text or "").strip()
-    action = context.user_data.get("pf_action")
-    mint = context.user_data.get("pf_mint")
-    use_jito = bool(context.user_data.get("pf_jito"))
+    amt_str = (update.message.text or '').strip()
+    action = context.user_data.get('pf_action')
+    mint = context.user_data.get('pf_mint')
+    use_jito = bool(context.user_data.get('pf_jito'))
+
     if not action or not mint:
         await update.message.reply_text("❌ Sesi tidak valid. Mulai ulang dari menu.")
         return ConversationHandler.END
 
+    # Parsing jumlah
     amount = amt_str
-    if action == "buy":
+    if action == 'buy':
         try:
             amount = float(amt_str)
             if amount <= 0:
                 raise ValueError
         except Exception:
             await update.message.reply_text("❌ Jumlah SOL tidak valid.")
-            return AWAITING_AMOUNT
+            return PUMPFUN_AWAITING_AMOUNT
     else:
-        if amt_str.endswith("%"):
+        if amt_str.endswith('%'):
             amount = amt_str  # biarkan "100%" ke backend
         else:
             try:
@@ -707,40 +713,30 @@ async def handle_pumpfun_amount_input(update: Update, context: ContextTypes.DEFA
                     raise ValueError
             except Exception:
                 await update.message.reply_text("❌ Jumlah token/persen tidak valid.")
-                return AWAITING_AMOUNT
+                return PUMPFUN_AWAITING_AMOUNT
 
     await update.message.reply_text("⏳ Menyiapkan transaksi…")
 
+    # Eksekusi Pumpfun (bukan Jupiter)
     try:
-        if use_jito:
-            try:
-                tx_sig = await solana_client.perform_pumpfun_jito_bundle(
-                    wallet["private_key"], amount, action, mint, bundle_count=1
-                )
-            except AttributeError:
-                # fallback ke local jika bundle belum diimplementasikan
-                tx_sig = await solana_client.perform_pumpfun_swap(
-                    wallet["private_key"], amount, action, mint
-                )
+        if use_jito and hasattr(solana_client, 'perform_pumpfun_jito_bundle'):
+            result = await solana_client.perform_pumpfun_jito_bundle(wallet["private_key"], amount, action, mint, bundle_count=1)
         else:
-            tx_sig = await solana_client.perform_pumpfun_swap(
-                wallet["private_key"], amount, action, mint
-            )
+            result = await solana_client.perform_pumpfun_swap(wallet["private_key"], amount, action, mint)
     except Exception as e:
-        tx_sig = f"Error: {e}"
+        result = f"Error: {e}"
 
-    if isinstance(tx_sig, str) and not tx_sig.lower().startswith("error"):
-        link = f"https://solscan.io/tx/{tx_sig}"
+    if isinstance(result, str) and not result.lower().startswith("error"):
+        link = f"https://solscan.io/tx/{result}"
         await update.message.reply_text(
-            f"✅ Tx terkirim.\n[`{tx_sig}`]({link})",
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
+            f"✅ Tx terkirim.\n[`{result}`]({link})", parse_mode="Markdown", disable_web_page_preview=True
         )
     else:
-        await update.message.reply_text(f"❌ Gagal.\n{tx_sig}")
+        await update.message.reply_text(f"❌ Gagal.\n{result}")
 
     context.user_data.clear()
     return ConversationHandler.END
+
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
@@ -750,42 +746,46 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     trade_conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(buy_sell, pattern="^buy_sell$"),
-            CallbackQueryHandler(handle_pumpfun_trade_entry, pattern="^pumpfun_trade$"),
-        ],
-        states={
-            AWAITING_TOKEN_ADDRESS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
-                CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*)$"),
-                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-            ],
-            AWAITING_TRADE_ACTION: [
-                # === Pumpfun choose action ===
-                CallbackQueryHandler(handle_pumpfun_action_selection, pattern=r"^(pf_buy|pf_sell|pf_buy_jito|pf_sell_jito)$"),
-                # === DEX choose action ===
-                CallbackQueryHandler(handle_trade_dex_selection, pattern=r"^trade_dex_.*$"),
-                CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)"),
-                CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
-                CallbackQueryHandler(handle_back_to_dex_selection, pattern="^back_to_dex_selection$"),
-            ],
-            AWAITING_AMOUNT: [
-                # amount untuk DEX umum
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
-                # amount untuk Pumpfun
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_amount_input),
-            ],
-            PUMPFUN_AWAITING_TOKEN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_token_input),
-                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-            ],
-        },
-        fallbacks=[
+    entry_points=[
+        CallbackQueryHandler(buy_sell, pattern="^buy_sell$"),
+        CallbackQueryHandler(handle_pumpfun_trade_entry, pattern="^pumpfun_trade$"),
+    ],
+    states={
+        # === Flow umum DEX ===
+        AWAITING_TOKEN_ADDRESS: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
+            CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*)$"),
             CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-            CommandHandler("start", start),
         ],
-        allow_reentry=True,
-    )
+        AWAITING_TRADE_ACTION: [
+            CallbackQueryHandler(handle_trade_dex_selection, pattern=r"^trade_dex_.*$"),
+            CallbackQueryHandler(handle_buy_sell_action, pattern=r"^(buy_.*|sell_.*|anti_mev_.*)$"),
+            CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
+            CallbackQueryHandler(handle_back_to_dex_selection, pattern="^back_to_dex_selection$"),
+        ],
+        AWAITING_AMOUNT: [
+            # HANYA untuk flow umum (Jupiter/Raydium)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
+        ],
+
+        # === Flow Pumpfun TERPISAH ===
+        PUMPFUN_AWAITING_TOKEN: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_token_input),
+            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+        ],
+        PUMPFUN_AWAITING_ACTION: [
+            CallbackQueryHandler(handle_pumpfun_action_selection, pattern=r"^(pf_buy|pf_sell|pf_buy_jito|pf_sell_jito)$"),
+        ],
+        PUMPFUN_AWAITING_AMOUNT: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_amount_input),
+        ],
+    },
+    fallbacks=[
+        CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+        CommandHandler("start", start),
+    ],
+    allow_reentry=True,
+)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(trade_conv_handler)
