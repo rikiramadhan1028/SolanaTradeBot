@@ -153,6 +153,8 @@ class SolanaClient:
             return f"Error: {self._format_exc(e)}"
 
     # ---------- Pumpfun local signing ----------
+    # --- PATCH: ganti isi 2 method di SolanaClient ---
+
     async def perform_pumpfun_swap(
         self, sender_private_key_json: str, amount, action: str, mint: str
     ) -> str:
@@ -161,7 +163,8 @@ class SolanaClient:
             public_key_str = str(keypair.pubkey())
 
             tx_b64 = await get_pumpfun_swap_transaction(
-                public_key_str, action, mint, amount, slippage=10, priority_fee=0.00001, pool="auto"
+                public_key_str, action, mint, amount,
+                slippage=10, priority_fee=0.00005, pool="auto"  # naikkan sedikit default tip
             )
             if not tx_b64:
                 return "Error: Could not build Pumpfun transaction (empty response)."
@@ -170,6 +173,22 @@ class SolanaClient:
             unsigned = self._vtx_from_bytes(tx_bytes)
             tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
+            # --- Simulate dulu biar dapat error detail ---
+            try:
+                sim = self.client.simulate_transaction(
+                    tx,
+                    sig_verify=False,
+                    replace_recent_blockhash=True,
+                )
+                sim_val = getattr(sim, "value", None)
+                if sim_val and getattr(sim_val, "err", None):
+                    logs = (sim_val.logs or [])[-5:] if hasattr(sim_val, "logs") else []
+                    return f"Error: Simulation failed: {sim_val.err}. Logs tail: {' | '.join(logs)}"
+            except Exception as e:
+                # simulasi gagal bukan blocker; lanjut kirim tapi tetap tampilkan info
+                print(f"[Pumpfun simulate warn] {self._format_exc(e)}")
+
+            # --- Kirim ---
             try:
                 resp = self.client.send_raw_transaction(
                     self._tx_bytes(tx),
@@ -189,7 +208,7 @@ class SolanaClient:
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
 
-    # ---------- Pumpfun Jito bundle ----------
+
     async def perform_pumpfun_jito_bundle(
         self,
         sender_private_key_json: str,
@@ -199,7 +218,7 @@ class SolanaClient:
         *,
         bundle_count: int = 1,
     ) -> str:
-        """Build bundle via trade-local (array), sign locally, lalu kirim ke Jito sendBundle."""
+        """Build bundle via trade-local (array), sign locally, kirim ke Jito; auto-fallback ke local bila rate limited."""
         try:
             if bundle_count < 1:
                 bundle_count = 1
@@ -212,7 +231,7 @@ class SolanaClient:
                 [mint] * bundle_count,
                 [amount] * bundle_count,
                 slippage=10,
-                priority_fee=0.00005,  # tip di tx pertama
+                priority_fee=0.0001,  # sedikit lebih tinggi utk bundle
                 pool="auto",
             )
             if not unsigned_base58_list:
@@ -232,18 +251,32 @@ class SolanaClient:
                 "method": "sendBundle",
                 "params": [signed_b58_list],
             }
+
             try:
                 async with httpx.AsyncClient(timeout=20.0) as client:
                     jr = await client.post(JITO_BUNDLE_ENDPOINT, json=payload)
+                    if jr.status_code == 429:
+                        # Endpoint rate limited -> langsung fallback ke local
+                        fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
+                        return fb if not fb.startswith("Error") else f"Error: Jito rate-limited (429). Fallback failed: {fb}"
                     jr.raise_for_status()
             except httpx.HTTPStatusError as e:
-                return f"Error: Jito sendBundle failed {e.response.status_code}: {e.response.text}"
+                body = e.response.text
+                # sering: {"code":-32097,"message":"Network congested. Endpoint is globally rate limited."}
+                if e.response.status_code in (429, 503) or "rate limited" in body.lower():
+                    fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
+                    return fb if not fb.startswith("Error") else f"Error: Jito rate-limited. Fallback failed: {fb}"
+                return f"Error: Jito sendBundle failed {e.response.status_code}: {body}"
             except Exception as e:
-                return f"Error: {self._format_exc(e)}"
+                # koneksi/timeout -> fallback
+                fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
+                return fb if not fb.startswith("Error") else f"Error: Jito error '{self._format_exc(e)}'. Fallback failed: {fb}"
 
+            # sukses submit bundle (tidak ada tx signature tunggal dari BE)
             return signatures[0] if signatures else "OK"
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
+
 
     # ---------- Misc ----------
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
