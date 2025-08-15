@@ -6,7 +6,7 @@ import json
 RAYDIUM_PRICE_API_URL = "https://api-v3.raydium.io/price/all"
 
 # Endpoint API harga dari PumpPortal (data API)
-PUMPPAL_DATA_API_URL = "https://pumpportal.fun/api/data"
+PUMPPORTAL_DATA_API_URL = "https://pumpportal.fun/api/data"
 
 async def get_token_price_from_raydium(token_address: str) -> dict:
     """

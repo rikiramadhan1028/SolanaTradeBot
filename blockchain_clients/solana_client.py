@@ -178,9 +178,17 @@ class SolanaClient:
 
             latest_blockhash = self.client.get_latest_blockhash().value.blockhash
 
-            decimals = 6  # Adjust if your token uses different decimals
+            # Determine token decimals dynamically instead of assuming 6.
+            # This ensures the correct amount is sent for tokens with
+            # different decimal configurations.
+            try:
+                balance_resp = self.client.get_token_account_balance(sender_token_account)
+                decimals = balance_resp.value.decimals
+            except Exception:
+                # Fallback to 6 decimals if the RPC call fails for any reason
+                decimals = 6
             token_amount = int(amount * (10 ** decimals))
-
+            
             transfer_instruction = transfer_checked(
                 program_id=TOKEN_PROGRAM_ID,
                 source=sender_token_account,

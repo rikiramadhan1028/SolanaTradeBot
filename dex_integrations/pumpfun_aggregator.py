@@ -3,7 +3,7 @@ import json
 import base64
 import config
 
-PUMPPAL_TRADE_API_URL = "https://pumpportal.fun/api/trade-local"
+PUMPPORTAL_DATA_API_URL = "https://pumpportal.fun/api/data"
 
 async def get_pumpfun_swap_transaction(public_key: str, action: str, mint: str, amount: float):
     """
