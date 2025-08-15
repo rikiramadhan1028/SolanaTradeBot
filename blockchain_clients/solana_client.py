@@ -110,19 +110,33 @@ class SolanaClient:
             return f"Error: {e}"
 
     async def perform_pumpfun_swap(
-        self, sender_private_key_json: str, amount: float, action: str, mint: str
+        self, sender_private_key_json: str, amount, action: str, mint: str
     ) -> str:
+        """
+        Local signing flow untuk PumpPortal:
+        - Ambil tx bytes via /api/trade-local (dibungkus base64 dari aggregator)
+        - Deserialize -> sign -> send_raw_transaction
+        """
         try:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
-            transaction_base64 = await get_pumpfun_swap_transaction(
-                public_key_str, action, mint, amount
+            # Ambil base64 dari aggregator yang sudah membaca response bytes
+            from dex_integrations.pumpfun_aggregator import get_pumpfun_swap_transaction
+
+            tx_b64 = await get_pumpfun_swap_transaction(
+                public_key_str,
+                action,
+                mint,
+                amount,  # bisa float (SOL/token) atau "100%"
+                slippage=10,
+                priority_fee=0.00001,
+                pool="auto",
             )
-            if not transaction_base64:
+            if not tx_b64:
                 return "Error: Could not build Pumpfun transaction."
 
-            tx_bytes = base64.b64decode(transaction_base64)
+            tx_bytes = base64.b64decode(tx_b64)
             tx = VersionedTransaction.deserialize(tx_bytes)
             tx.sign([keypair])
 
@@ -138,7 +152,7 @@ class SolanaClient:
         except Exception as e:
             print(f"Pumpfun Swap error details: {e}")
             return f"Error: {e}"
-
+        
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
         try:
             keypair = self._get_keypair_from_private_key(private_key_json)
