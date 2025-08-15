@@ -1,58 +1,58 @@
-# dex_integrations/raydium_aggregator.py
+# file: dex_integrations/raydium_aggregator.py
 import httpx
 import json
 import base64
 
-RAYDIUM_QUOTE_API_URL = "https://api.raydium.io/v2/amm/pools" 
+# Catatan: endpoint /v2/amm/pools bukan quote murni; biarkan fail-fast bila tak sesuai
+RAYDIUM_QUOTE_API_URL = "https://api.raydium.io/v2/amm/pools"
 RAYDIUM_SWAP_API_URL = "https://api.raydium.io/v2/transaction/swap"
+
 
 async def get_swap_quote(input_mint: str, output_mint: str, amount: int):
     """
-    Mendapatkan kuotasi swap dari API Raydium.
+    DUMMY quote handler agar caller bisa fail-fast jika respons bukan quote yang diharapkan.
     """
     params = {
         "inputMint": input_mint,
         "outputMint": output_mint,
         "amount": amount,
-        "slippage": 0.5, # 0.5% slippage
+        "slippage": 0.5,  # 0.5%
     }
-
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(RAYDIUM_QUOTE_API_URL, params=params)
-            response.raise_for_status()
-            return response.json()
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(RAYDIUM_QUOTE_API_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+            # Tidak ada format quote resmi di endpoint ini; kembalikan None agar caller fallback.
+            return None
     except httpx.HTTPStatusError as e:
-        print(f"HTTP error occurred on Raydium: {e.response.status_code} - {e.response.text}")
+        print(f"[Raydium HTTP] {e.response.status_code} - {e.response.text}")
         return None
     except httpx.RequestError as e:
-        print(f"An error occurred while requesting Raydium API: {e.request.url!r}.")
+        print(f"[Raydium ReqError] {e.request.url!r}")
         return None
+
 
 async def get_swap_transaction(quote: dict, user_public_key: str):
     """
-    Mendapatkan transaksi swap dari API Raydium.
+    DUMMY swap tx; mempertahankan API supaya tidak memecahkan import caller.
     """
-    # API Raydium V2 tidak membutuhkan quote dalam payload swap transaction
-    # Sebaliknya, ia membutuhkan input yang sama dengan quote endpoint
-    # ditambah public key pengguna
     payload = {
         "owner": user_public_key,
-        "inputMint": quote.get('inputMint'),
-        "outputMint": quote.get('outputMint'),
-        "amount": quote.get('amount'),
-        "slippage": 0.5
+        "inputMint": quote.get("inputMint") if quote else None,
+        "outputMint": quote.get("outputMint") if quote else None,
+        "amount": quote.get("amount") if quote else None,
+        "slippage": 0.5,
     }
-    
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(RAYDIUM_SWAP_API_URL, json=payload)
-            response.raise_for_status()
-            response_data = response.json()
-            return response_data.get("transaction")
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(RAYDIUM_SWAP_API_URL, json=payload)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("transaction")
     except httpx.HTTPStatusError as e:
-        print(f"HTTP error occurred on Raydium: {e.response.status_code} - {e.response.text}")
+        print(f"[Raydium HTTP] {e.response.status_code} - {e.response.text}")
         return None
     except httpx.RequestError as e:
-        print(f"An error occurred while requesting Raydium API: {e.request.url!r}.")
+        print(f"[Raydium ReqError] {e.request.url!r}")
         return None
