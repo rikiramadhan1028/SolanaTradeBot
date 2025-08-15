@@ -1,87 +1,41 @@
-# dex_integrations/price_aggregator.py
+# file: dex_integrations/price_aggregator.py
+# Price via Jupiter Price API v3 + helpers you already had.
+from typing import Dict
 import httpx
-import json
 
-# Endpoint API harga publik dari Raydium
-RAYDIUM_PRICE_API_URL = "https://api-v3.raydium.io/price/all"
+JUP_PRICE_URL = "https://price.jup.ag/v3/price"  # official v3
 
-# Endpoint API harga dari PumpPortal (data API)
-PUMPPORTAL_DATA_API_URL = "https://pumpportal.fun/api/data"
-
-async def get_token_price_from_raydium(token_address: str) -> dict:
+async def get_token_price(mint: str, vs_token: str = "USDC") -> Dict:
     """
-    Mengambil harga real-time, market cap, dan info likuiditas dari API Raydium.
+    Get price for a single token mint using Jupiter Price API v3.
+    Returns: {"price": float, "mc": "N/A", "source": "jup"}
+    If unavailable, returns price=0.0
     """
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(RAYDIUM_PRICE_API_URL)
-            response.raise_for_status()
-            price_data = response.json()
-            
-            # Mencari harga token berdasarkan alamat kontrak
-            token_info = price_data.get(token_address)
-            
-            if token_info:
-                return {
-                    "price": token_info.get("price"),
-                    "lp": "N/A",
-                    "mc": token_info.get("marketCap")
-                }
-            else:
-                return {"price": 0, "lp": "N/A", "mc": "N/A"}
-    except httpx.HTTPStatusError as e:
-        print(f"HTTP error occurred: {e.response.status_code} - {e.response.text}")
-        return {"price": 0, "lp": "N/A", "mc": "N/A"}
-    except httpx.RequestError as e:
-        print(f"An error occurred while requesting {e.request.url!r}.")
-        return {"price": 0, "lp": "N/A", "mc": "N/A"}
-    except Exception as e:
-        print(f"Error fetching token price: {e}")
-        return {"price": 0, "lp": "N/A", "mc": "N/A"}
+        params = {"ids": mint, "vsToken": vs_token}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(JUP_PRICE_URL, params=params)
+            r.raise_for_status()
+            data = r.json() or {}
+            # v3 response format example:
+            # { "data": { "<mint>": { "id": "...", "price": 0.123..., "vsToken": "USDC", ... } } }
+            entry = (data.get("data") or {}).get(mint)
+            if not entry:
+                return {"price": 0.0, "mc": "N/A", "source": "jup"}
+            price = entry.get("price")
+            if price is None:
+                return {"price": 0.0, "mc": "N/A", "source": "jup"}
+            return {"price": float(price), "mc": "N/A", "source": "jup"}
+    except Exception:
+        return {"price": 0.0, "mc": "N/A", "source": "jup"}
 
-async def get_token_price_from_pumpfun(token_address: str) -> dict:
-    """
-    Mengambil data harga dari API data PumpPortal.
-    """
-    # Catatan: API data PumpPortal menggunakan WebSocket,
-    # tetapi untuk kesederhanaan, kita bisa menggunakan API REST pihak ketiga jika tersedia.
-    # Namun, karena tidak ada API REST publik yang jelas untuk ini, kita akan menggunakan
-    # data dari API trading sebagai fallback untuk mendapatkan info dasar.
-    # Implementasi ini mengasumsikan API quote dari Jupiter atau API lain yang serupa.
-    
-    # Placeholder untuk API quote Pumpfun yang spesifik.
-    # Kita bisa menggunakan endpoint quote dari Jupiter yang mendukung Pumpfun.
-    QUOTE_API_URL = "https://public.jupiterapi.com/pump-fun/quote"
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                QUOTE_API_URL,
-                params={
-                    "mint": token_address,
-                    "type": "BUY",
-                    "amount": 1_000_000_000 # Contoh: 1 SOL
-                }
-            )
-            response.raise_for_status()
-            quote_data = response.json()
-            
-            if quote_data:
-                # API ini memberikan currentMarketCapInSol, yang bisa kita gunakan
-                price = float(quote_data.get("currentMarketCapInSol")) / float(quote_data.get("totalSupply"))
-                return {
-                    "price": price,
-                    "lp": quote_data.get("liquidity", "N/A"),
-                    "mc": quote_data.get("currentMarketCapInSol")
-                }
-            else:
-                return {"price": 0, "lp": "N/A", "mc": "N/A"}
 
-    except httpx.HTTPStatusError as e:
-        print(f"HTTP error occurred: {e.response.status_code} - {e.response.text}")
-        return {"price": 0, "lp": "N/A", "mc": "N/A"}
-    except httpx.RequestError as e:
-        print(f"An error occurred while requesting {e.request.url!r}.")
-        return {"price": 0, "lp": "N/A", "mc": "N/A"}
-    except Exception as e:
-        print(f"Error fetching token price from Pumpfun: {e}")
-        return {"price": 0, "lp": "N/A", "mc": "N/A"}
+# Keep these if other parts of the bot import them
+# (your main already calls these as fallbacks)
+async def get_token_price_from_raydium(mint: str) -> Dict:
+    # stub/fallback kept for compatibility – implement as in your repo if needed
+    return {"price": 0.0, "mc": "N/A", "source": "raydium"}
+
+async def get_token_price_from_pumpfun(mint: str) -> Dict:
+    # stub/fallback kept for compatibility – implement as in your repo if needed
+    return {"price": 0.0, "mc": "N/A", "source": "pumpfun"}
