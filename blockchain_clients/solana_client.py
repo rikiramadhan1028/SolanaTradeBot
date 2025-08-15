@@ -5,7 +5,7 @@ import base58
 import httpx
 
 from solana.rpc.api import Client
-from solana.rpc.types import TxOpts, TokenAccountOpts
+from solana.rpc.types import TxOpts
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -40,14 +40,25 @@ class SolanaClient:
     def __init__(self, rpc_url: str):
         self.client = Client(rpc_url)
 
-    # --- compat helper: beda versi solders ---
+    # --- Compat helpers untuk berbagai versi "solders" ---
     @staticmethod
     def _vtx_from_bytes(buf: bytes) -> VersionedTransaction:
-        """Deserialize VersionedTransaction across solders versions."""
+        """Deserialize VersionedTransaction: prefer from_bytes(), fallback deserialize()."""
         try:
-            return VersionedTransaction.from_bytes(buf)  # modern
+            return VersionedTransaction.from_bytes(buf)  # solders modern
         except AttributeError:
-            return VersionedTransaction.deserialize(buf)  # lama  # type: ignore[attr-defined]
+            return VersionedTransaction.deserialize(buf)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _tx_bytes(tx: VersionedTransaction) -> bytes:
+        """Serialize VersionedTransaction: prefer to_bytes(), fallback serialize()/bytes()."""
+        try:
+            return tx.to_bytes()  # solders modern
+        except AttributeError:
+            try:
+                return tx.serialize()  # type: ignore[attr-defined]
+            except AttributeError:
+                return bytes(tx)
 
     def get_balance(self, public_key_str: str) -> float:
         try:
@@ -88,7 +99,6 @@ class SolanaClient:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
-            swap_transaction_b64 = None
             if dex == "jupiter":
                 route = await jupiter_get_route(input_mint, output_mint, amount_lamports)
                 if not route:
@@ -111,7 +121,7 @@ class SolanaClient:
             tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
             sig_resp = self.client.send_raw_transaction(
-                tx.serialize(),
+                self._tx_bytes(tx),
                 opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
             )
             try:
@@ -141,7 +151,7 @@ class SolanaClient:
             tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
 
             sig_resp = self.client.send_raw_transaction(
-                tx.serialize(),
+                self._tx_bytes(tx),
                 opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
             )
             try:
@@ -187,8 +197,8 @@ class SolanaClient:
             for enc in unsigned_base58_list:
                 unsigned = self._vtx_from_bytes(bytes(base58.b58decode(enc)))
                 vtx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
-                signed_b58_list.append(base58.b58encode(vtx.serialize()).decode())
-                signatures.append(base58.b58encode(bytes(vtx.signatures[0])).decode())
+                signed_b58_list.append(base58.b58encode(self._tx_bytes(vtx)).decode())
+                signatures.append(str(vtx.signatures[0]))
 
             # Kirim ke Jito Block Engine
             payload = {
@@ -245,10 +255,10 @@ class SolanaClient:
                 recent_blockhash=latest_blockhash,
                 address_lookup_table_accounts=[],
             )
-            tx = VersionedTransaction(msg, [sender_keypair])  # signed
+            tx = VersionedTransaction(msg, [sender_keypair])  # already signed
 
             result = self.client.send_raw_transaction(
-                tx.serialize(),
+                self._tx_bytes(tx),
                 opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
             )
             if result.value:
@@ -307,10 +317,10 @@ class SolanaClient:
                 recent_blockhash=latest_blockhash,
                 address_lookup_table_accounts=[],
             )
-            tx = VersionedTransaction(msg, [sender_keypair])  # signed
+            tx = VersionedTransaction(msg, [sender_keypair])  # already signed
 
             result = self.client.send_raw_transaction(
-                tx.serialize(),
+                self._tx_bytes(tx),
                 opts=TxOpts(skip_preflight=False, preflight_commitment="confirmed"),
             )
             return str(result.value)
