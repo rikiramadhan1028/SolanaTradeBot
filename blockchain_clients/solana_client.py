@@ -2,6 +2,7 @@
 import json
 import base64
 import base58
+import httpx
 
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts, TokenAccountOpts
@@ -23,11 +24,18 @@ from dex_integrations.jupiter_aggregator import (
     get_swap_route as jupiter_get_route,
     get_swap_transaction as jupiter_get_tx,
 )
-from dex_integrations.pumpfun_aggregator import get_pumpfun_swap_transaction
+from dex_integrations.pumpfun_aggregator import get_pumpfun_bundle_unsigned_base58, get_pumpfun_swap_transaction
 from dex_integrations.raydium_aggregator import (
     get_swap_quote as raydium_get_quote,
     get_swap_transaction as raydium_get_tx,
 )
+
+from dex_integrations.pumpfun_aggregator import (
+    get_pumpfun_swap_transaction,
+    get_pumpfun_bundle_unsigned_base58,
+)
+
+JITO_BUNDLE_ENDPOINT = "https://mainnet.block-engine.jito.wtf/api/v1/bundles" 
 
 
 class SolanaClient:
@@ -109,29 +117,14 @@ class SolanaClient:
             print(f"Swap error details: {e}")
             return f"Error: {e}"
 
-    async def perform_pumpfun_swap(
-        self, sender_private_key_json: str, amount, action: str, mint: str
-    ) -> str:
-        """
-        Local signing flow untuk PumpPortal:
-        - Ambil tx bytes via /api/trade-local (dibungkus base64 dari aggregator)
-        - Deserialize -> sign -> send_raw_transaction
-        """
+    async def perform_pumpfun_swap(self, sender_private_key_json: str, amount, action: str, mint: str) -> str:
         try:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
-            # Ambil base64 dari aggregator yang sudah membaca response bytes
-            from dex_integrations.pumpfun_aggregator import get_pumpfun_swap_transaction
-
             tx_b64 = await get_pumpfun_swap_transaction(
-                public_key_str,
-                action,
-                mint,
-                amount,  # bisa float (SOL/token) atau "100%"
-                slippage=10,
-                priority_fee=0.00001,
-                pool="auto",
+                public_key_str, action, mint, amount,
+                slippage=10, priority_fee=0.00001, pool="auto"
             )
             if not tx_b64:
                 return "Error: Could not build Pumpfun transaction."
@@ -151,6 +144,64 @@ class SolanaClient:
             return str(sig_resp.value)
         except Exception as e:
             print(f"Pumpfun Swap error details: {e}")
+            return f"Error: {e}"
+
+    async def perform_pumpfun_jito_bundle(
+        self,
+        sender_private_key_json: str,
+        amount,
+        action: str,
+        mint: str,
+        *,
+        bundle_count: int = 1,
+    ) -> str:
+        """
+        Bangun bundle via trade-local (array), sign, lalu kirim ke Jito sendBundle.
+        Minimal 1 tx (boleh >1). Lihat contoh resmi. :contentReference[oaicite:5]{index=5}
+        """
+        try:
+            if bundle_count < 1:
+                bundle_count = 1
+            keypair = self._get_keypair_from_private_key(sender_private_key_json)
+            public_key_str = str(keypair.pubkey())
+
+            unsigned_base58_list = await get_pumpfun_bundle_unsigned_base58(
+                [public_key_str] * bundle_count,
+                [action] * bundle_count,
+                [mint] * bundle_count,
+                [amount] * bundle_count,
+                slippage=10,
+                priority_fee=0.00005,  # tip/jito fee di tx pertama
+                pool="auto",
+            )
+            if not unsigned_base58_list:
+                return "Error: Could not build Pumpfun bundle."
+
+            # Sign semua tx & encode base58 serialized bytes
+            import base58 as b58
+            signed_b58_list = []
+            signatures = []
+            for enc in unsigned_base58_list:
+                vtx = VersionedTransaction.deserialize(bytes(b58.b58decode(enc)))
+                vtx.sign([keypair])
+                signed_b58_list.append(b58.b58encode(vtx.serialize()).decode())
+                signatures.append(b58.b58encode(vtx.signatures[0]).decode())
+
+            # Kirim ke Jito Block Engine
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendBundle",
+                "params": [signed_b58_list],
+            }
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                jr = await client.post(JITO_BUNDLE_ENDPOINT, json=payload)
+                jr.raise_for_status()
+                # Tidak selalu ada signature tunggal; balas signature[0] utk Solscan
+                return signatures[0] if signatures else "OK"
+        except httpx.HTTPStatusError as e:
+            return f"Error: Jito sendBundle failed {e.response.status_code}: {e.response.text}"
+        except Exception as e:
             return f"Error: {e}"
         
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
