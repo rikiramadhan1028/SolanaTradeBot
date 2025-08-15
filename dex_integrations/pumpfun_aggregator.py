@@ -3,7 +3,7 @@ import json
 import base64
 import config
 
-PUMPPORTAL_DATA_API_URL = "https://pumpportal.fun/api/data"
+PUMPPORTAL_TRADE_API_URL = "https://pumpportal.fun/api/trade-local"
 
 async def get_pumpfun_swap_transaction(public_key: str, action: str, mint: str, amount: float):
     """
@@ -29,7 +29,7 @@ async def get_pumpfun_swap_transaction(public_key: str, action: str, mint: str, 
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(PUMPPAL_TRADE_API_URL, json=payload, headers=headers)
+            response = await client.post(PUMPPORTAL_TRADE_API_URL, json=payload, headers=headers)
             response.raise_for_status()
             response_data = response.json()
             return response_data.get("transaction")
