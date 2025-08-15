@@ -201,10 +201,10 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
             sol_balance_str = "Error"
 
     welcome_text = (
-        f"👋 Hello {user_mention}! Welcome to <b>TradeBeat Bot</b>\n\n"
+        f"👋 Hello {user_mention}! Welcome to <b>RokuTrade</b>\n\n"
         f"Wallet address: <code>{solana_address}</code>\n"
         f"Wallet balance: <code>{sol_balance_str}</code> ($~)\n\n"
-        f"🔗 Referral link: https://t.me/TradeBeatBot?start=ref_{user_id}\n\n"
+        f"🔗 Referral link: https://t.me/RokuTrade?start=ref_{user_id}\n\n"
         f"✅ Send a contract address to start trading."
     )
     return welcome_text
