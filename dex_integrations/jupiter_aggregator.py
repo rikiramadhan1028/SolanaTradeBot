@@ -2,7 +2,7 @@
 import httpx
 import json
 
-QUOTE_API_URL = "https://lite-api.jup.ag/swap/v1/quote"
+QUOTE_API_URL = "https://quote-api.jup.ag/v6/quote"
 SWAP_API_URL = "https://lite-api.jup.ag/swap/v1/swap"
 
 
