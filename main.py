@@ -1141,19 +1141,19 @@ def main() -> None:
             ],
             AWAITING_TRADE_ACTION: [
                 CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)$"),
-                CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
+                # CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
                 CallbackQueryHandler(handle_refresh_token_panel, pattern="^token_panel_refresh$"),
                 CallbackQueryHandler(handle_set_slippage_entry, pattern="^set_(buy|sell)_slippage$"),
                 CallbackQueryHandler(handle_noop, pattern="^noop_.*$"),
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
+                # CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
             AWAITING_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
             ],
             SET_SLIPPAGE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_slippage_value),
-                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
+                # CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
             PUMPFUN_AWAITING_TOKEN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_trade_token),
