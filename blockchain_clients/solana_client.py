@@ -398,56 +398,86 @@ class SolanaClient:
 
     def get_spl_token_balances(self, owner_address: str):
         """
-        Listing seluruh token (program lama). Tidak selalu mencakup Token-2022.
-        Dipakai untuk tampilan 'Asset'. Untuk akurasi SELL gunakan get_token_balance().
+        Return a list of token balances for `owner_address`.
+
+        Shape:
+        [
+          {"mint": <str>, "amount": <float_ui>, "decimals": <int>},
+          ...
+        ]
         """
         try:
-            owner = Pubkey.from_string(owner_address)
-            program_id = Pubkey.from_string(str(TOKEN_PROGRAM_ID))
-            resp = self.client.get_token_accounts_by_owner(
+            owner = Pubkey(owner_address)
+        except Exception as e:
+            print(f"[get_spl_token_balances] invalid owner: {e}")
+            return []
+
+        out = []
+
+        try:
+            # 1) Standard SPL Token program
+            resp = self.client.get_token_accounts_by_owner_json_parsed(
                 owner,
-                TokenAccountOpts(program_id=program_id),
-                encoding="jsonParsed",
+                TokenAccountOpts(program_id=TOKEN_PROGRAM_ID),
             )
-            balances = []
-            for item in (getattr(resp, "value", None) or []):
+            for acc in (resp.value or []):
                 try:
-                    acc = getattr(item, "account", None) or (item.get("account") if isinstance(item, dict) else None)
-                    data = getattr(acc, "data", None) or (acc.get("data") if isinstance(acc, dict) else None)
-                    parsed = getattr(data, "parsed", None) or (data.get("parsed") if isinstance(data, dict) else None)
-                    info = parsed.get("info") if isinstance(parsed, dict) else None
-                    if not isinstance(info, dict):
-                        continue
-                    token_amount = info.get("tokenAmount") or {}
-                    ui_amt = token_amount.get("uiAmount")
-                    decimals = token_amount.get("decimals")
-                    mint = info.get("mint")
-                    pubkey = getattr(item, "pubkey", None) or (item.get("pubkey") if isinstance(item, dict) else None)
-                    if mint is not None and ui_amt is not None:
-                        balances.append({
-                            "mint": str(mint),
-                            "amount": float(ui_amt),
-                            "decimals": int(decimals) if decimals is not None else 0,
-                            "account": str(pubkey) if pubkey else "",
-                        })
+                    parsed = acc.account.data.parsed
+                    info = parsed["info"]
+                    mint = info["mint"]
+                    ta = info["tokenAmount"]
+                    dec = int(ta.get("decimals", 0))
+                    # `uiAmount` can be None -> use string/amount
+                    ui = ta.get("uiAmount")
+                    if ui is None:
+                        amt_str = ta.get("uiAmountString")
+                        if amt_str is not None:
+                            ui = float(amt_str)
+                        else:
+                            raw = float(ta.get("amount", "0"))
+                            ui = raw / (10 ** dec if dec else 1)
+                    out.append({"mint": mint, "amount": float(ui), "decimals": dec})
                 except Exception:
                     continue
-            return balances
         except Exception as e:
             print(f"[get_spl_token_balances] error for {owner_address}: {e}")
-            return []
-        
-    def get_token_decimals(self, mint_address: str) -> int:
-        """
-        Ambil decimals mint; fallback 6 jika gagal.
-        """
+
+        # 2) (Optional) Token-2022 balances — uncomment if you need them and know the program id
+        # try:
+        #     resp2 = self.client.get_token_accounts_by_owner_json_parsed(
+        #         owner,
+        #         TokenAccountOpts(program_id=TOKEN_2022_PROGRAM_ID),
+        #     )
+        #     for acc in (resp2.value or []):
+        #         try:
+            #         parsed = acc.account.data.parsed
+            #         info = parsed["info"]
+            #         mint = info["mint"]
+            #         ta = info["tokenAmount"]
+            #         dec = int(ta.get("decimals", 0))
+            #         ui = ta.get("uiAmount")
+            #         if ui is None:
+            #             amt_str = ta.get("uiAmountString")
+            #             if amt_str is not None:
+            #                 ui = float(amt_str)
+            #             else:
+            #                 raw = float(ta.get("amount", "0"))
+            #                 ui = raw / (10 ** dec if dec else 1)
+            #         out.append({"mint": mint, "amount": float(ui), "decimals": dec})
+        #         except Exception:
+        #             continue
+        # except Exception as e:
+        #     print(f"[get_spl_token_balances token2022] error for {owner_address}: {e}")
+
+        return out
+
+    def get_token_decimals(self, mint_str: str) -> int:
+        """Small helper used by perform_trade() fallback."""
         try:
-            mint = Pubkey.from_string(mint_address)
+            mint = Pubkey(mint_str)
             supply = self.client.get_token_supply(mint)
-            dec = getattr(supply.value, "decimals", None)
-            return int(dec) if dec is not None else 6
-        except Exception as e:
-            print(f"[get_token_decimals] error for {mint_address}: {e}")
+            return int(supply.value.decimals)
+        except Exception:
             return 6
 
     def get_token_balance(self, owner_address: str, mint_address: str) -> float:
