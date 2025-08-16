@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
-# main.py — RokuTrade Bot
-
+﻿# file: main.py
 import os
 import json
 import re
@@ -8,19 +6,8 @@ import asyncio, httpx
 from datetime import datetime, timezone
 from typing import Optional
 
-# ---- env harus loaded SEBELUM os.getenv dipanggil ----
 from dotenv import load_dotenv
-load_dotenv()
-
-# ---- ENV ----
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TRADE_SVC_URL      = os.getenv("TRADE_SVC_URL", "http://localhost:8080")
-
-# Optional fee settings (default OFF)
-FEE_BPS     = int(os.getenv("FEE_BPS", "0"))            # e.g. 100 = 1%
-FEE_WALLET  = os.getenv("FEE_WALLET", "")               # treasury address
-FEE_ENABLED = FEE_BPS > 0 and bool(FEE_WALLET)
-
+TRADE_SVC_URL = os.getenv("TRADE_SVC_URL", "http://localhost:8080")
 import config
 import database
 import wallet_manager
@@ -37,23 +24,70 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-# ============ DEX & Pump.fun via Node microservice ============
-from services.trade_service import (
-    dex_swap,
-    pumpfun_swap,
-    svc_get_mint_decimals,
-    svc_get_sol_balance,
-    svc_get_token_balance,
-)
+# --- Token metadata resolver (symbol/name) ---
 
-# ============ Price aggregator (Jupiter/Raydium/Pumpfun) ============
+_symbol_cache: dict[str, str] = {}
+
+async def _fetch_symbol_from_jupiter(mint: str) -> str | None:
+    url = f"https://tokens.jup.ag/token/{mint}"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as s:
+            r = await s.get(url)
+        if r.status_code == 200:
+            j = r.json() or {}
+            # j: {"address":..., "symbol":"RAY","name":"Raydium", ...}
+            sym = (j.get("symbol") or j.get("name") or "").strip()
+            return sym or None
+    except Exception:
+        pass
+    return None
+
+async def _fetch_symbol_from_dexscreener(mint: str) -> str | None:
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as s:
+            r = await s.get(url)
+        if r.status_code == 200:
+            j = r.json() or {}
+            pairs = j.get("pairs") or []
+            # cari token yang address-nya == mint (prioritaskan baseToken)
+            for p in pairs:
+                base = (p.get("baseToken") or {})
+                quote = (p.get("quoteToken") or {})
+                if base.get("address") == mint:
+                    return (base.get("symbol") or base.get("name") or "").strip() or None
+                if quote.get("address") == mint:
+                    return (quote.get("symbol") or quote.get("name") or "").strip() or None
+    except Exception:
+        pass
+    return None
+
+async def resolve_token_label(mint: str) -> str:
+    """Balikin 'RAY' / 'USDC' / 'NAME' dengan cache dan fallback ke potongan mint."""
+    if mint in _symbol_cache:
+        return _symbol_cache[mint]
+    sym = await _fetch_symbol_from_jupiter(mint)
+    if not sym:
+        sym = await _fetch_symbol_from_dexscreener(mint)
+    if not sym:
+        sym = mint[:6].upper()  # fallback
+    _symbol_cache[mint] = sym
+    return sym
+
+
+# DEX & Pump.fun via Node microservice
+from services.trade_service import dex_swap, pumpfun_swap, svc_get_mint_decimals, svc_get_sol_balance, svc_get_token_balance, svc_get_token_balances
+
+# Price sources (your aggregator module)
 from dex_integrations.price_aggregator import (
-    get_token_price,                      # Jupiter Price API
+    get_token_price,  # Jupiter price api
     get_token_price_from_raydium,
     get_token_price_from_pumpfun,
 )
 
 # ================== Init ==================
+load_dotenv()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SOLANA_NATIVE_TOKEN_MINT = "So11111111111111111111111111111111111111112"
 solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
@@ -68,6 +102,11 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
 # ================== UI Helpers ==================
 def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Ensure each message has a way to go back.
+    If prev_cb given -> show both '⬅️ Back' (prev) and '🏠 Menu'.
+    Else -> only '🏠 Menu'.
+    """
     rows = []
     if prev_cb:
         rows.append(InlineKeyboardButton("⬅️ Back", callback_data=prev_cb))
@@ -78,11 +117,12 @@ def solscan_tx(sig: str) -> str:
     return f"https://solscan.io/tx/{sig}"
 
 def short_err_text(err: str) -> str:
+    """Map long/technical error into short & friendly message."""
     s = (err or "").strip()
     low = s.lower()
-    if "balance_low" in low or ("insufficient" in low and "sol" in low):
+    if "balance_low" in low or "insufficient" in low and "sol" in low:
         return "Insufficient SOL for amount + fees."
-    if "token_balance_low" in low or "insufficient balance for token" in low:
+    if "token_balance_low" in low:
         return "Insufficient token balance to sell."
     if "simulation_failed" in low:
         return "Simulation failed (route/slippage). Try smaller amount."
@@ -116,6 +156,7 @@ def format_usd(v: float | str) -> str:
             return f"${f:.4f}"
         if f < 1000:
             return f"${f:.2f}"
+        # compact
         for s, m in [("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]:
             if f >= m:
                 return f"${f/m:.2f}{s}"
@@ -124,6 +165,7 @@ def format_usd(v: float | str) -> str:
     return "N/A"
 
 def percent_label(bps: int | None, default_pct: float = 5.0) -> str:
+    """Convert basis points to label like '18%'. 100 bps = 1%."""
     if not isinstance(bps, int) or bps <= 0:
         return f"{default_pct:.0f}%"
     return f"{bps/100:.0f}%"
@@ -133,7 +175,15 @@ def dexscreener_url(mint: str) -> str:
 
 # ================== Data Helpers (Dexscreener) ==================
 async def get_dexscreener_stats(mint: str) -> dict:
-    """Return {priceUsd, fdvUsd, liquidityUsd, name, symbol} or {}."""
+    """
+    Fetch latest price/FDV/liquidity from Dexscreener for a token.
+    Returns:
+      {
+        priceUsd, fdvUsd, liquidityUsd,
+        name, symbol
+      }
+    or {} on error.
+    """
     url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -143,16 +193,13 @@ async def get_dexscreener_stats(mint: str) -> dict:
             pairs = (data or {}).get("pairs") or []
             if not pairs:
                 return {}
-            # pilih pair ber-liquidity tertinggi
+            # pick highest-liquidity pair
             pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
             p0 = pairs[0]
             base = p0.get("baseToken") or {}
-            fdv = p0.get("fdv")
-            if fdv is None:
-                fdv = p0.get("marketCap")  # fallback jika field yang tersedia marketCap
             return {
                 "priceUsd": p0.get("priceUsd"),
-                "fdvUsd": fdv,
+                "fdvUsd": p0.get("fdv"),
                 "liquidityUsd": (p0.get("liquidity") or {}).get("usd"),
                 "name": base.get("name"),
                 "symbol": base.get("symbol"),
@@ -238,7 +285,9 @@ def validate_and_clean_private_key(key_data: str) -> str:
                 import base58
                 return base58.b58encode(key_bytes).decode()
             except Exception:
-                raise ValueError(f"Invalid private key format. Not valid Base58 or Hex: {decode_error}")
+                raise ValueError(
+                    f"Invalid private key format. Not valid Base58 or Hex: {decode_error}"
+                )
 
 # ================== Token Panel (no DEX selection) ==================
 def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
@@ -281,8 +330,9 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
     ])
     return InlineKeyboardMarkup(kb)
 
+# --- REPLACE this function ---
 async def build_token_panel(user_id: int, mint: str) -> str:
-    """Compact summary with price & LP from Dexscreener; unknown -> N/A."""
+    """Compact summary like screenshot. Unknown fields show as N/A."""
     wallet_info = database.get_user_wallet(user_id)
     addr = wallet_info.get("address", "--") if wallet_info else "--"
 
@@ -299,10 +349,11 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     price_text = "N/A"
     mc_text = "N/A"
     lp_text = "N/A"
-    display_name = None
+    display_name = None  # will show "$SYMBOL" or Name
 
     ds = await get_dexscreener_stats(mint)
     if ds:
+        # header display
         symbol = (ds.get("symbol") or "") or ""
         name = (ds.get("name") or "") or ""
         if symbol:
@@ -311,8 +362,8 @@ async def build_token_panel(user_id: int, mint: str) -> str:
             display_name = name
 
         price_text = format_usd(ds.get("priceUsd") or 0)
-        mc_text    = format_usd(ds.get("fdvUsd") or 0)
-        lp_text    = format_usd(ds.get("liquidityUsd") or 0)
+        mc_text = format_usd(ds.get("fdvUsd") or 0)
+        lp_text = format_usd(ds.get("liquidityUsd") or 0)
     else:
         price_data = await get_token_price(mint)
         if price_data["price"] <= 0:
@@ -323,11 +374,13 @@ async def build_token_panel(user_id: int, mint: str) -> str:
         mc_val = price_data.get("mc")
         mc_text = format_usd(mc_val if isinstance(mc_val, (int, float)) else 0)
 
+    # fallback display when name/symbol not found
     if not display_name:
-        display_name = f"{mint[:4]}…{mint[-4:]}"
+        display_name = f"{mint[:4]}…{mint[-4:]}"  # short address
 
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]  # 13:36:26.586
 
+    # HTML panel
     lines = []
     lines.append(f"Swap <b>{display_name}</b> 📈")
     lines.append("")
@@ -376,33 +429,13 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     spl_tokens = []
     try:
         if solana_address:
-            spl_tokens = []  # prefer Node/web3.js? For now use python client:
             spl_tokens = solana_client.get_spl_token_balances(solana_address)
     except Exception as e:
         print(f"[SPL Token Balance Error] {e}")
 
-    async def fetch_token_meta(mint: str) -> dict:
-        try:
-            url = f"{TRADE_SVC_URL}/meta/token/{mint}"
-            async with httpx.AsyncClient(timeout=8.0) as s:
-                r = await s.get(url)
-            if r.status_code == 200:
-                return r.json() or {}
-        except Exception as e:
-            print(f"[meta] fetch error for {mint}: {e}")
-        return {}
-
-    def format_token_label(meta: dict, mint: str) -> str:
-        sym = (meta.get("symbol") or "").strip()
-        name = (meta.get("name") or "").strip()
-        if sym:
-            return sym
-        if name:
-            return name
-        return mint[:6].upper()
-
     if spl_tokens:
         msg += "\n\n🔹 <b>SPL Tokens</b>\n"
+        # ambil meta paralel
         metas = await asyncio.gather(*(fetch_token_meta(t["mint"]) for t in spl_tokens), return_exceptions=True)
         for t, m in zip(spl_tokens, metas):
             meta = m if isinstance(m, dict) else {}
@@ -410,6 +443,8 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             msg += f"{t['amount']:.6f} <b>{label}</b>\n"
 
     await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_context(context)
@@ -462,6 +497,9 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text.strip().replace("\n", " ")
     command, *args = text.split(maxsplit=1)
     command = command.lower()
+
+    # do NOT clear here—user may be in slippage entry etc.
+    # clear_user_context(context)
 
     if command == "import":
         if len(args) == 0:
@@ -633,7 +671,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         return
 
-    # slippage flow teks
+    # If user is in slippage input flow
     if context.user_data.get("awaiting_slippage_input"):
         await handle_set_slippage_value(update, context)
         return
@@ -735,9 +773,11 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
     context.user_data["token_address"] = token_address
     context.user_data["selected_dex"] = "jupiter"  # fixed route
+    # defaults if not set
     context.user_data.setdefault("slippage_bps_buy", 500)   # 5%
     context.user_data.setdefault("slippage_bps_sell", 500)  # 5%
 
+    # Render token panel (no DEX selection)
     panel = await build_token_panel(update.effective_user.id, token_address)
     await message.reply_html(panel, reply_markup=token_panel_keyboard(context))
     return AWAITING_TRADE_ACTION
@@ -815,32 +855,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return AWAITING_AMOUNT
     return ConversationHandler.END
 
-# ------------------------- FEE helper -------------------------
-def _fee_ui(val_ui: float) -> float:
-    return max(0.0, float(val_ui) * (FEE_BPS / 10_000.0))
-
-async def _send_fee_sol_if_any(private_key: str, ui_amount: float, message, reason: str):
-    if not FEE_ENABLED:
-        return None
-    fee_ui = _fee_ui(ui_amount)
-    if fee_ui <= 0.00001:  # minimum to avoid dust/gas wasting
-        return None
-    tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
-    if isinstance(tx, str) and not tx.lower().startswith("error"):
-        await reply_ok_html(message, f"💸 Platform fee ({reason}): {fee_ui:.6f} SOL sent.", signature=tx)
-        return tx
-    else:
-        # jangan gagalkan swap hanya karena fee tx gagal
-        await reply_err_html(message, f"⚠️ Fee transfer failed: {tx}", prev_cb="back_to_token_panel")
-        return None
-
-# ------------------------- Trade core -------------------------
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
     """
     Robust trade executor:
-    - BUY  : SOL -> token (fee diambil dari input SOL sebelum swap)
-    - SELL : token -> SOL (fee diambil dari hasil SOL sesudah swap)
-    - Balances/decimals via trade-svc (web3.js) agar akurat.
+    - BUY  : SOL -> token
+    - SELL : token -> SOL (bisa % dari saldo)
+    - Baca saldo & decimals via trade-svc (web3.js) agar akurat untuk SPL / Token-2022.
+    - Tampilkan pesan error singkat & enak dibaca.
     """
     message = update.message if update.message else update.callback_query.message
 
@@ -873,37 +894,16 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     # ===================== BUY =====================
     if trade_type == "buy":
-        # Optional fee (pre-charge)
-        amount_ui = float(amount)
-        swap_ui = amount_ui
-        if FEE_ENABLED:
-            fee_ui = _fee_ui(amount_ui)
-            # sisakan buffer 0.002 SOL untuk fee jaringan/ATA
-            buffer_ui = 0.002
-            swap_ui = max(0.0, amount_ui - fee_ui - buffer_ui)
-            if swap_ui <= 0:
-                await reply_err_html(
-                    message,
-                    f"❌ Amount too small after platform fee ({fee_ui:.6f} SOL) and buffer.",
-                    prev_cb="back_to_token_panel",
-                )
-                return
-            # kirim fee dulu, jika gagal -> batalkan
-            fee_tx = solana_client.send_sol(wallet["private_key"], FEE_WALLET, fee_ui)
-            if not (isinstance(fee_tx, str) and not fee_tx.lower().startswith("error")):
-                await reply_err_html(message, f"❌ Fee transfer failed: {fee_tx}", prev_cb="back_to_token_panel")
-                return
-            await reply_ok_html(message, f"💸 Platform fee (BUY): {fee_ui:.6f} SOL sent.", signature=fee_tx)
-
         input_mint       = SOL_MINT
         output_mint      = token_mint
         slippage_bps     = buy_slip_bps
-        amount_lamports  = int(float(swap_ui) * 1_000_000_000)  # SOL -> lamports
+        amount_lamports  = int(float(amount) * 1_000_000_000)  # SOL -> lamports
 
-        # pre-check saldo SOL (friendly)
+        # (opsional) pre-check saldo SOL supaya errornya lebih ramah
         try:
             sol_ui = await svc_get_sol_balance(wallet["address"])
-            need_ui = float(swap_ui) + 0.002
+            # kira-kira biaya ekstra untuk wSOL/ATA/fee kecil ± 0.002 SOL
+            need_ui = float(amount) + 0.002
             if sol_ui + 1e-9 < need_ui:
                 await reply_err_html(
                     message,
@@ -912,6 +912,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 )
                 return
         except Exception:
+            # jika check gagal, tetap lanjut — Jupiter akan memvalidasi
             pass
 
     # ===================== SELL =====================
@@ -920,6 +921,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         output_mint = SOL_MINT
         slippage_bps = sel_slip_bps
 
+        # ✔ baca decimals & saldo token via Node (web3.js)
         try:
             decimals = int(await svc_get_mint_decimals(token_mint))
         except Exception:
@@ -941,15 +943,8 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             sell_ui = token_balance_ui * (float(amount) / 100.0)
             amount_lamports = int(sell_ui * (10 ** decimals))
         else:
-            sell_ui = float(amount)
-            if sell_ui > token_balance_ui + 1e-12:
-                await reply_err_html(
-                    message,
-                    "❌ Amount exceeds wallet balance.",
-                    prev_cb="back_to_token_panel",
-                )
-                return
-            amount_lamports = int(sell_ui * (10 ** decimals))
+            # amount dianggap dalam satuan UI token (bukan SOL)
+            amount_lamports = int(float(amount) * (10 ** decimals))
 
         if amount_lamports <= 0:
             await reply_err_html(
@@ -958,14 +953,6 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 prev_cb="back_to_token_panel",
             )
             return
-
-        # baca SOL balance sebelum swap (untuk hitung fee sesudahnya)
-        pre_sol_ui = 0.0
-        if FEE_ENABLED:
-            try:
-                pre_sol_ui = await svc_get_sol_balance(wallet["address"])
-            except Exception:
-                pre_sol_ui = 0.0
 
     # Feedback ke user saat eksekusi
     await reply_ok_html(
@@ -990,24 +977,14 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         clear_user_context(context)
         return ConversationHandler.END
 
+    # trade-svc returns { "signature": "..." } or { "error": "..." }
     if isinstance(res, dict) and res.get("signature"):
-        sig = res["signature"]
         await reply_ok_html(
             message,
             "✅ Swap successful!",
             prev_cb="back_to_token_panel",
-            signature=sig,
+            signature=res["signature"],
         )
-        # SELL fee post-swap
-        if trade_type != "buy" and FEE_ENABLED:
-            try:
-                await asyncio.sleep(1.2)  # beri waktu balance settle
-                post_sol_ui = await svc_get_sol_balance(wallet["address"])
-                delta_ui = max(0.0, post_sol_ui - pre_sol_ui)
-                if delta_ui > 0:
-                    await _send_fee_sol_if_any(wallet["private_key"], delta_ui, message, "SELL")
-            except Exception as e:
-                await reply_err_html(message, f"⚠️ Fee check failed: {e}", prev_cb="back_to_token_panel")
     else:
         err = res.get("error") if isinstance(res, dict) else res
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
@@ -1015,6 +992,61 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     clear_user_context(context)
     await reply_ok_html(message, "Done! What's next?", prev_cb=None)
     return ConversationHandler.END
+
+async def fetch_token_meta(mint: str) -> dict:
+    """
+    Ambil metadata token dari trade-svc: { mint, symbol, name, decimals?, source }
+    Fallback: symbol/name kosong -> None
+    """
+    try:
+        url = f"{TRADE_SVC_URL}/meta/token/{mint}"
+        async with httpx.AsyncClient(timeout=8.0) as s:
+            r = await s.get(url)
+        if r.status_code == 200:
+            return r.json() or {}
+    except Exception as e:
+        print(f"[meta] fetch error for {mint}: {e}")
+    return {}
+
+def format_token_label(meta: dict, mint: str) -> str:
+    """
+    Tentukan label singkat yang enak dibaca:
+    - Prioritas symbol, kalau kosong pakai name, kalau kosong pakai 6 char pertama mint
+    """
+    sym = (meta.get("symbol") or "").strip()
+    name = (meta.get("name") or "").strip()
+    if sym:
+        return sym
+    if name:
+        return name
+    return mint[:6].upper()
+
+
+async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    clear_user_context(context)
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "📄 Please send the <b>token contract address</b> you want to trade.",
+        parse_mode="HTML",
+        reply_markup=back_markup("back_to_main_menu"),
+    )
+    return AWAITING_TOKEN_ADDRESS
+
+async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    mint = context.user_data.get("token_address")
+    if not mint:
+        await q.edit_message_text(
+            "📄 Please send the <b>token contract address</b> you want to trade.",
+            parse_mode="HTML",
+            reply_markup=back_markup("back_to_main_menu"),
+        )
+        return AWAITING_TOKEN_ADDRESS
+    panel = await build_token_panel(q.from_user.id, mint)
+    await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+    return AWAITING_TRADE_ACTION
 
 # ----- Slippage set flow -----
 async def handle_set_slippage_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1041,13 +1073,16 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
             context.user_data["slippage_bps_sell"] = bps
         else:
             context.user_data["slippage_bps_buy"] = bps
+        # clear flags
         context.user_data.pop("awaiting_slippage_input", None)
         context.user_data.pop("slippage_target", None)
+        # back to panel
         panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""))
         await update.message.reply_html(
-            f"✅ Slippage {tgt.UPPER()} set to {pct:.0f}%.",
+            f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.",
             reply_markup=back_markup("back_to_token_panel"),
         )
+        # also show panel again
         await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
         return AWAITING_TRADE_ACTION
     except Exception:
@@ -1057,7 +1092,7 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         )
         return SET_SLIPPAGE
 
-# ----- Pump.fun flow -----
+# ----- Pump.fun flow (unchanged except buttons) -----
 async def handle_pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clear_user_context(context)
     query = update.callback_query
@@ -1142,11 +1177,10 @@ def main() -> None:
             AWAITING_TRADE_ACTION: [
                 CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)$"),
                 CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
+                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
                 CallbackQueryHandler(handle_refresh_token_panel, pattern="^token_panel_refresh$"),
                 CallbackQueryHandler(handle_set_slippage_entry, pattern="^set_(buy|sell)_slippage$"),
                 CallbackQueryHandler(handle_noop, pattern="^noop_.*$"),
-                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
             AWAITING_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
@@ -1173,13 +1207,10 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*$"))
     application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"))
     application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="^import_wallet$"))
-    application.add_handler(
-        CallbackQueryHandler(
-            dummy_response, pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$"
-        )
-    )
+    application.add_handler(CallbackQueryHandler(dummy_response, pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$"))
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
+    # Catch-all text commands after conversations
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
 
     print("Bot is running...")

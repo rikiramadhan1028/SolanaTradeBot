@@ -9,6 +9,7 @@ import {
   getSpecificTokenBalance,
   getMintDecimals,
 } from './wallet.js';
+import { attachMetaRoutes } from "./meta.js";
 
 import { cfg } from './config.js';
 import { connectDb, Trade } from './db.js';
@@ -38,7 +39,7 @@ const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, family: 4 
 const app = express();
 app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
-
+attachMetaRoutes(app);
 // ---------- Health & Diagnostics ----------
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
 
