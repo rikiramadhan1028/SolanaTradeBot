@@ -398,43 +398,31 @@ class SolanaClient:
 
     def get_spl_token_balances(self, owner_address: str):
         """
-        Return list SPL balances:
-        [
-          {"mint": "<mint>", "amount": <float uiAmount>, "decimals": <int>, "account": "<token_acc>"},
-          ...
-        ]
-        Kompatibel lintas versi solana-py: gunakan encoding="jsonParsed".
+        Listing seluruh token (program lama). Tidak selalu mencakup Token-2022.
+        Dipakai untuk tampilan 'Asset'. Untuk akurasi SELL gunakan get_token_balance().
         """
         try:
             owner = Pubkey.from_string(owner_address)
             program_id = Pubkey.from_string(str(TOKEN_PROGRAM_ID))
-
-            # JSON-parsed langsung dari RPC
             resp = self.client.get_token_accounts_by_owner(
                 owner,
                 TokenAccountOpts(program_id=program_id),
                 encoding="jsonParsed",
             )
-
             balances = []
-            value = getattr(resp, "value", None) or []
-            for item in value:
+            for item in (getattr(resp, "value", None) or []):
                 try:
-                    # item bisa object (RpcKeyedAccount) atau dict (tergantung versi)
                     acc = getattr(item, "account", None) or (item.get("account") if isinstance(item, dict) else None)
                     data = getattr(acc, "data", None) or (acc.get("data") if isinstance(acc, dict) else None)
                     parsed = getattr(data, "parsed", None) or (data.get("parsed") if isinstance(data, dict) else None)
                     info = parsed.get("info") if isinstance(parsed, dict) else None
                     if not isinstance(info, dict):
                         continue
-
                     token_amount = info.get("tokenAmount") or {}
                     ui_amt = token_amount.get("uiAmount")
                     decimals = token_amount.get("decimals")
                     mint = info.get("mint")
-
                     pubkey = getattr(item, "pubkey", None) or (item.get("pubkey") if isinstance(item, dict) else None)
-
                     if mint is not None and ui_amt is not None:
                         balances.append({
                             "mint": str(mint),
@@ -444,7 +432,6 @@ class SolanaClient:
                         })
                 except Exception:
                     continue
-
             return balances
         except Exception as e:
             print(f"[get_spl_token_balances] error for {owner_address}: {e}")
@@ -462,3 +449,34 @@ class SolanaClient:
         except Exception as e:
             print(f"[get_token_decimals] error for {mint_address}: {e}")
             return 6
+
+    def get_token_balance(self, owner_address: str, mint_address: str) -> float:
+        """
+        Ambil total saldo (uiAmount) untuk MINT tertentu pada OWNER.
+        Ini menggunakan filter 'mint' sehingga bekerja untuk Token Program lama maupun Token-2022.
+        """
+        try:
+            owner = Pubkey.from_string(owner_address)
+            mint = Pubkey.from_string(mint_address)
+
+            resp = self.client.get_token_accounts_by_owner(
+                owner,
+                TokenAccountOpts(mint=mint),
+                encoding="jsonParsed",
+ )
+            total = 0.0
+            for item in (getattr(resp, "value", None) or []):
+                acc = getattr(item, "account", None) or (item.get("account") if isinstance(item, dict) else None)
+                data = getattr(acc, "data", None) or (acc.get("data") if isinstance(acc, dict) else None)
+                parsed = getattr(data, "parsed", None) or (data.get("parsed") if isinstance(data, dict) else None)
+                info = parsed.get("info") if isinstance(parsed, dict) else None
+                if not isinstance(info, dict):
+                    continue
+                token_amount = info.get("tokenAmount") or {}
+                ui_amt = token_amount.get("uiAmount")
+                if ui_amt is not None:
+                    total += float(ui_amt)
+            return float(total)
+        except Exception as e:
+            print(f"[get_token_balance] error for {owner_address} mint {mint_address}: {e}")
+            return 0.0

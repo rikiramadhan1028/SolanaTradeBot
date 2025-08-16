@@ -800,6 +800,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return ConversationHandler.END
 
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
+    """
+    Buy:
+      - amount is in SOL; we convert to lamports
+    Sell:
+      - your UI sends percentage (10/25/50/100). We fetch actual token balance by mint
+        (supports Token-2022) and convert % of that to base units (lamports)
+    """
     message = update.message if update.message else update.callback_query.message
 
     user_id = update.effective_user.id
@@ -812,10 +819,10 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         )
         return
 
-    trade_type = (context.user_data.get("trade_type") or "").lower()
-    amount_type = (context.user_data.get("amount_type") or "").lower()
+    trade_type   = (context.user_data.get("trade_type") or "").lower()      # 'buy' | 'sell'
+    amount_type  = (context.user_data.get("amount_type") or "").lower()     # 'sol' | 'percentage'
     token_address = context.user_data.get("token_address")
-    dex = "jupiter"
+    dex = "jupiter"  # we always route via Jupiter
 
     if not token_address:
         await reply_err_html(
@@ -836,38 +843,81 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             pass
         return default
 
+    # ---- Build swap params ----
     if trade_type == "buy":
-        input_mint = SOLANA_NATIVE_TOKEN_MINT
+        # SOL -> token
+        input_mint  = SOLANA_NATIVE_TOKEN_MINT
         output_mint = token_address
-        amount_lamports = int(float(amount) * 1_000_000_000)  # SOL -> lamports
+        try:
+            sol_amount = float(amount)
+        except Exception:
+            await reply_err_html(message, "❌ Invalid SOL amount.", prev_cb="back_to_token_panel")
+            return
+        if sol_amount <= 0:
+            await reply_err_html(message, "❌ Amount must be greater than 0.", prev_cb="back_to_token_panel")
+            return
+        amount_lamports = int(sol_amount * 1_000_000_000)  # SOL -> lamports
         slippage_bps = int(context.user_data.get("slippage_bps_buy", 500))
+
     else:
-        input_mint = token_address
+        # token -> SOL
+        input_mint  = token_address
         output_mint = SOLANA_NATIVE_TOKEN_MINT
         slippage_bps = int(context.user_data.get("slippage_bps_sell", 500))
+
+        decimals = _decimals_or_default(token_address, 6)
+
         if amount_type == "percentage":
-            decimals = _decimals_or_default(token_address, 6)
-            spl_tokens = solana_client.get_spl_token_balances(wallet["address"])
-            token_balance = next((t["amount"] for t in spl_tokens if t["mint"] == token_address), 0)
-            if token_balance <= 0:
+            # Get real token balance for this mint on this wallet (supports Token-2022)
+            try:
+                token_balance_ui = solana_client.get_token_balance(wallet["address"], token_address)
+            except Exception as e:
+                print(f"[SELL] balance fetch error: {e}")
+                token_balance_ui = 0.0
+
+            if token_balance_ui <= 0:
                 await reply_err_html(
                     message,
                     f"❌ Insufficient balance for token `{token_address}`.",
                     prev_cb="back_to_token_panel",
                 )
                 return
-            amount_to_sell = float(token_balance) * (float(amount) / 100.0)
-            amount_lamports = int(amount_to_sell * (10 ** decimals))
-        else:
-            decimals = _decimals_or_default(token_address, 6)
-            amount_lamports = int(float(amount) * (10 ** decimals))
 
+            try:
+                pct = float(amount)  # 10, 25, 50, 100
+            except Exception:
+                await reply_err_html(message, "❌ Invalid percentage.", prev_cb="back_to_token_panel")
+                return
+            pct = max(0.0, min(100.0, pct))
+
+            amount_ui = token_balance_ui * (pct / 100.0)
+            amount_lamports = int(amount_ui * (10 ** decimals))
+
+        else:
+            # If someday you add "Sell X tokens" (not percentage) – treat amount as UI tokens
+            try:
+                amt_tokens_ui = float(amount)
+            except Exception:
+                await reply_err_html(message, "❌ Invalid token amount.", prev_cb="back_to_token_panel")
+                return
+            if amt_tokens_ui <= 0:
+                await reply_err_html(message, "❌ Amount must be greater than 0.", prev_cb="back_to_token_panel")
+                return
+            amount_lamports = int(amt_tokens_ui * (10 ** decimals))
+
+    # Guard
+    if amount_lamports <= 0:
+        await reply_err_html(message, "❌ Amount too small.", prev_cb="back_to_token_panel")
+        return
+
+    # Notify user
     await reply_ok_html(
         message,
         f"⏳ Performing {trade_type} on `{token_address}` …",
         prev_cb="back_to_token_panel",
     )
 
+    # ---- Call trade-svc (Jupiter) ----
     try:
         res = await dex_swap(
             private_key=wallet["private_key"],
@@ -894,11 +944,16 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         )
     else:
         err = res.get("error") if isinstance(res, dict) else res
-        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
+        await reply_err_html(
+            message,
+            f"❌ Swap failed: {short_err_text(str(err))}",
+            prev_cb="back_to_token_panel",
+        )
 
     clear_user_context(context)
     await reply_ok_html(message, "Done! What's next?", prev_cb=None)
     return ConversationHandler.END
+
 
 async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clear_user_context(context)
