@@ -3,6 +3,12 @@ import express, { Request, Response } from 'express';
 import dns from 'node:dns/promises';
 import https from 'node:https';
 import axios from 'axios';
+import {
+  getSolBalance,
+  getTokenBalances,
+  getSpecificTokenBalance,
+  getMintDecimals,
+} from './wallet.js';
 
 import { cfg } from './config.js';
 import { connectDb, Trade } from './db.js';
@@ -309,3 +315,43 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
   await connectDb();
   app.listen(cfg.port, '0.0.0.0', () => console.log(`trade-svc running on :${cfg.port}`));
 })();
+
+// ---------- Wallet (web3.js) ----------
+app.get('/wallet/:addr/balance', async (req: Request, res: Response) => {
+  try {
+    const v = await getSolBalance(cfg.rpcUrl, String(req.params.addr));
+    res.json({ sol: v });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get('/wallet/:addr/tokens', async (req: Request, res: Response) => {
+  try {
+    const rows = await getTokenBalances(cfg.rpcUrl, String(req.params.addr));
+    // opsional filter kosong
+    const min = Number(req.query.min || '0');
+    const filtered = rows.filter(r => r.amount > min);
+    res.json({ tokens: filtered });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get('/wallet/:addr/token/:mint/balance', async (req: Request, res: Response) => {
+  try {
+    const v = await getSpecificTokenBalance(cfg.rpcUrl, String(req.params.addr), String(req.params.mint));
+    res.json({ amount: v });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get('/wallet/mint/:mint/decimals', async (req: Request, res: Response) => {
+  try {
+    const d = await getMintDecimals(cfg.rpcUrl, String(req.params.mint));
+    res.json({ decimals: d });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});

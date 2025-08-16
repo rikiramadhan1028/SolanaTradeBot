@@ -47,3 +47,28 @@ async def dex_swap(private_key: str, input_mint: str, output_mint: str, amount_l
                "amountLamports": int(amount_lamports), "dex": dex, "slippageBps": slippage_bps,
                "priorityFee": priority_fee_sol}
     return await _post("/dex/swap", payload)
+
+async def svc_get_sol_balance(address: str):
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        r = await client.get(f"{TRADE_SVC_URL}/wallet/{address}/balance")
+        r.raise_for_status()
+        return r.json().get("sol", 0.0)
+
+async def svc_get_token_balances(address: str, min_amount: float = 0.0):
+    params = {"min": str(min_amount)} if min_amount > 0 else None
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(f"{TRADE_SVC_URL}/wallet/{address}/tokens", params=params)
+        r.raise_for_status()
+        return r.json().get("tokens", [])
+
+async def svc_get_token_balance(address: str, mint: str):
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        r = await client.get(f"{TRADE_SVC_URL}/wallet/{address}/token/{mint}/balance")
+        r.raise_for_status()
+        return r.json().get("amount", 0.0)
+
+async def svc_get_mint_decimals(mint: str):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{TRADE_SVC_URL}/wallet/mint/{mint}/decimals")
+        r.raise_for_status()
+        return int(r.json().get("decimals", 6))
