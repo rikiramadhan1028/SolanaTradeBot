@@ -44,23 +44,22 @@ class SolanaClient:
     @staticmethod
     def _vtx_from_bytes(buf: bytes) -> VersionedTransaction:
         try:
-            return VersionedTransaction.from_bytes(buf)       # solders modern
+            return VersionedTransaction.from_bytes(buf)  # solders baru
         except AttributeError:
-            return VersionedTransaction.deserialize(buf)       # solders lama  # type: ignore[attr-defined]
+            return VersionedTransaction.deserialize(buf)  # solders lama  # type: ignore[attr-defined]
 
     @staticmethod
     def _tx_bytes(tx: VersionedTransaction) -> bytes:
         try:
-            return tx.to_bytes()                               # solders modern
+            return tx.to_bytes()  # solders baru
         except AttributeError:
             try:
-                return tx.serialize()                          # solders lama   # type: ignore[attr-defined]
+                return tx.serialize()  # solders lama  # type: ignore[attr-defined]
             except AttributeError:
                 return bytes(tx)
 
     @staticmethod
     def _format_exc(e: Exception) -> str:
-        # Why: beberapa exception dari solana lib kosong; gunakan args/repr agar informatif.
         msg = str(e)
         if not msg and getattr(e, "args", None):
             try:
@@ -143,7 +142,6 @@ class SolanaClient:
             sig = getattr(resp, "value", None)
             if not sig:
                 return f"Error: RPC returned no signature: {resp}"
-            # optional confirm
             try:
                 self.client.confirm_transaction(sig, commitment="confirmed")
             except Exception:
@@ -153,8 +151,6 @@ class SolanaClient:
             return f"Error: {self._format_exc(e)}"
 
     # ---------- Pumpfun local signing ----------
-    # --- PATCH: ganti isi 2 method di SolanaClient ---
-
     async def perform_pumpfun_swap(
         self, sender_private_key_json: str, amount, action: str, mint: str
     ) -> str:
@@ -163,17 +159,21 @@ class SolanaClient:
             public_key_str = str(keypair.pubkey())
 
             tx_b64 = await get_pumpfun_swap_transaction(
-                public_key_str, action, mint, amount,
-                slippage=10, priority_fee=0.00005, pool="auto"  # naikkan sedikit default tip
+                public_key_str,
+                action,
+                mint,
+                amount,
+                slippage=10,
+                priority_fee=0.00005,
+                pool="auto",
             )
             if not tx_b64:
                 return "Error: Could not build Pumpfun transaction (empty response)."
 
             tx_bytes = base64.b64decode(tx_b64)
             unsigned = self._vtx_from_bytes(tx_bytes)
-            tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
+            tx = VersionedTransaction(unsigned.message, [keypair])  # signed
 
-            # --- Simulate dulu biar dapat error detail ---
             try:
                 sim = self.client.simulate_transaction(
                     tx,
@@ -185,10 +185,8 @@ class SolanaClient:
                     logs = (sim_val.logs or [])[-5:] if hasattr(sim_val, "logs") else []
                     return f"Error: Simulation failed: {sim_val.err}. Logs tail: {' | '.join(logs)}"
             except Exception as e:
-                # simulasi gagal bukan blocker; lanjut kirim tapi tetap tampilkan info
                 print(f"[Pumpfun simulate warn] {self._format_exc(e)}")
 
-            # --- Kirim ---
             try:
                 resp = self.client.send_raw_transaction(
                     self._tx_bytes(tx),
@@ -207,7 +205,6 @@ class SolanaClient:
             return str(sig)
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
-
 
     async def perform_pumpfun_jito_bundle(
         self,
@@ -231,7 +228,7 @@ class SolanaClient:
                 [mint] * bundle_count,
                 [amount] * bundle_count,
                 slippage=10,
-                priority_fee=0.0001,  # sedikit lebih tinggi utk bundle
+                priority_fee=0.0001,
                 pool="auto",
             )
             if not unsigned_base58_list:
@@ -256,27 +253,22 @@ class SolanaClient:
                 async with httpx.AsyncClient(timeout=20.0) as client:
                     jr = await client.post(JITO_BUNDLE_ENDPOINT, json=payload)
                     if jr.status_code == 429:
-                        # Endpoint rate limited -> langsung fallback ke local
                         fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
                         return fb if not fb.startswith("Error") else f"Error: Jito rate-limited (429). Fallback failed: {fb}"
                     jr.raise_for_status()
             except httpx.HTTPStatusError as e:
                 body = e.response.text
-                # sering: {"code":-32097,"message":"Network congested. Endpoint is globally rate limited."}
                 if e.response.status_code in (429, 503) or "rate limited" in body.lower():
                     fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
                     return fb if not fb.startswith("Error") else f"Error: Jito rate-limited. Fallback failed: {fb}"
                 return f"Error: Jito sendBundle failed {e.response.status_code}: {body}"
             except Exception as e:
-                # koneksi/timeout -> fallback
                 fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
                 return fb if not fb.startswith("Error") else f"Error: Jito error '{self._format_exc(e)}'. Fallback failed: {fb}"
 
-            # sukses submit bundle (tidak ada tx signature tunggal dari BE)
             return signatures[0] if signatures else "OK"
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
-
 
     # ---------- Misc ----------
     def get_public_key_from_private_key_json(self, private_key_json: str) -> Pubkey:
@@ -396,15 +388,11 @@ class SolanaClient:
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
 
+    # ---------- BALANCES (fix utama) ----------
     def get_spl_token_balances(self, owner_address: str):
         """
-        Return a list of token balances for `owner_address`.
-
-        Shape:
-        [
-          {"mint": <str>, "amount": <float_ui>, "decimals": <int>},
-          ...
-        ]
+        Return list of token balances for `owner_address`.
+        Shape: [{ "mint": str, "amount": float_ui, "decimals": int }, ...]
         """
         try:
             owner = Pubkey(owner_address)
@@ -413,21 +401,23 @@ class SolanaClient:
             return []
 
         out = []
-
         try:
-            # 1) Standard SPL Token program
+            # Ambil semua ATA di program SPL Token standar (jsonParsed)
             resp = self.client.get_token_accounts_by_owner_json_parsed(
                 owner,
                 TokenAccountOpts(program_id=TOKEN_PROGRAM_ID),
             )
-            for acc in (resp.value or []):
+            for acc in (getattr(resp, "value", None) or []):
                 try:
-                    parsed = acc.account.data.parsed
+                    # dukung object maupun dict
+                    acc_obj = getattr(acc, "account", None) or acc.get("account")
+                    data = getattr(acc_obj, "data", None) or acc_obj.get("data")
+                    parsed = getattr(data, "parsed", None) or data.get("parsed")
                     info = parsed["info"]
                     mint = info["mint"]
                     ta = info["tokenAmount"]
                     dec = int(ta.get("decimals", 0))
-                    # `uiAmount` can be None -> use string/amount
+
                     ui = ta.get("uiAmount")
                     if ui is None:
                         amt_str = ta.get("uiAmountString")
@@ -436,43 +426,17 @@ class SolanaClient:
                         else:
                             raw = float(ta.get("amount", "0"))
                             ui = raw / (10 ** dec if dec else 1)
+
                     out.append({"mint": mint, "amount": float(ui), "decimals": dec})
                 except Exception:
                     continue
         except Exception as e:
             print(f"[get_spl_token_balances] error for {owner_address}: {e}")
 
-        # 2) (Optional) Token-2022 balances — uncomment if you need them and know the program id
-        # try:
-        #     resp2 = self.client.get_token_accounts_by_owner_json_parsed(
-        #         owner,
-        #         TokenAccountOpts(program_id=TOKEN_2022_PROGRAM_ID),
-        #     )
-        #     for acc in (resp2.value or []):
-        #         try:
-            #         parsed = acc.account.data.parsed
-            #         info = parsed["info"]
-            #         mint = info["mint"]
-            #         ta = info["tokenAmount"]
-            #         dec = int(ta.get("decimals", 0))
-            #         ui = ta.get("uiAmount")
-            #         if ui is None:
-            #             amt_str = ta.get("uiAmountString")
-            #             if amt_str is not None:
-            #                 ui = float(amt_str)
-            #             else:
-            #                 raw = float(ta.get("amount", "0"))
-            #                 ui = raw / (10 ** dec if dec else 1)
-            #         out.append({"mint": mint, "amount": float(ui), "decimals": dec})
-        #         except Exception:
-        #             continue
-        # except Exception as e:
-        #     print(f"[get_spl_token_balances token2022] error for {owner_address}: {e}")
-
         return out
 
     def get_token_decimals(self, mint_str: str) -> int:
-        """Small helper used by perform_trade() fallback."""
+        """Fallback helper if needed."""
         try:
             mint = Pubkey(mint_str)
             supply = self.client.get_token_supply(mint)
@@ -482,30 +446,40 @@ class SolanaClient:
 
     def get_token_balance(self, owner_address: str, mint_address: str) -> float:
         """
-        Ambil total saldo (uiAmount) untuk MINT tertentu pada OWNER.
-        Ini menggunakan filter 'mint' sehingga bekerja untuk Token Program lama maupun Token-2022.
+        Total uiAmount untuk MINT tertentu pada OWNER.
+        Pakai jsonParsed + filter mint agar akurat.
         """
         try:
             owner = Pubkey.from_string(owner_address)
             mint = Pubkey.from_string(mint_address)
 
-            resp = self.client.get_token_accounts_by_owner(
+            # gunakan endpoint jsonParsed versi mint-filtered
+            resp = self.client.get_token_accounts_by_owner_json_parsed(
                 owner,
                 TokenAccountOpts(mint=mint),
-                encoding="jsonParsed",
- )
+            )
             total = 0.0
             for item in (getattr(resp, "value", None) or []):
-                acc = getattr(item, "account", None) or (item.get("account") if isinstance(item, dict) else None)
-                data = getattr(acc, "data", None) or (acc.get("data") if isinstance(acc, dict) else None)
-                parsed = getattr(data, "parsed", None) or (data.get("parsed") if isinstance(data, dict) else None)
-                info = parsed.get("info") if isinstance(parsed, dict) else None
-                if not isinstance(info, dict):
+                try:
+                    acc = getattr(item, "account", None) or item.get("account")
+                    data = getattr(acc, "data", None) or acc.get("data")
+                    parsed = getattr(data, "parsed", None) or data.get("parsed")
+                    info = parsed.get("info") if isinstance(parsed, dict) else None
+                    if not isinstance(info, dict):
+                        continue
+                    ta = info.get("tokenAmount") or {}
+                    dec = int(ta.get("decimals", 0))
+                    ui = ta.get("uiAmount")
+                    if ui is None:
+                        amt_str = ta.get("uiAmountString")
+                        if amt_str is not None:
+                            ui = float(amt_str)
+                        else:
+                            raw = float(ta.get("amount", "0"))
+                            ui = raw / (10 ** dec if dec else 1)
+                    total += float(ui)
+                except Exception:
                     continue
-                token_amount = info.get("tokenAmount") or {}
-                ui_amt = token_amount.get("uiAmount")
-                if ui_amt is not None:
-                    total += float(ui_amt)
             return float(total)
         except Exception as e:
             print(f"[get_token_balance] error for {owner_address} mint {mint_address}: {e}")
