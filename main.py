@@ -72,6 +72,7 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
     PUMPFUN_AWAITING_SELL_PERCENTAGE,
 ) = range(8)
 
+(COPY_AWAIT_LEADER, COPY_AWAIT_RATIO, COPY_AWAIT_MAX) = range(8, 11)
 # ================== UI Helpers ==================
 def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
     rows = []
@@ -453,29 +454,45 @@ async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
-    follows = database.copy_follow_list_for_user(user_id)
-    if follows:
-        rows = []
-        for f in follows:
-            st = "ON" if f.get("active") else "OFF"
-            rows.append(f"• <code>{f['leader_address']}</code>  ratio={f.get('ratio',1.0)}  max={f.get('max_sol_per_trade',0.5)}  [{st}]")
-        body = "\n".join(rows)
-    else:
-        body = "No leaders yet."
 
+    follows = database.copy_follow_list_for_user(user_id) or []
+    rows = []
+    kb_rows = []
+
+    if follows:
+        for f in follows:
+            leader = f["leader_address"]
+            st = "🟢 ON" if f.get("active") else "⚪ OFF"
+            ratio = f.get("ratio", 1.0)
+            mx = f.get("max_sol_per_trade", 0.5)
+            rows.append(f"• <code>{leader}</code>  r={ratio:g}  max={mx:g}  [{st}]")
+
+            # tombol ON/OFF + Remove untuk tiap leader
+            kb_rows.append([
+                InlineKeyboardButton("Toggle ON/OFF", callback_data=f"copy_toggle:{leader}"),
+                InlineKeyboardButton("🗑️ Remove", callback_data=f"copy_remove:{leader}"),
+            ])
+    else:
+        rows.append("No leaders yet.")
+
+    body = "\n".join(rows)
     text = (
         "📋 <b>Copy Trading</b>\n\n"
         f"{body}\n\n"
-        "Commands:\n"
-        "<code>copyadd LEADER_PUBKEY RATIO MAX_SOL</code>\n"
-        "  e.g. <code>copyadd 7N...Z 1.0 0.25</code>\n"
-        "<code>copyoff LEADER_PUBKEY</code> / <code>copyon LEADER_PUBKEY</code>\n"
-        "<code>copyrm LEADER_PUBKEY</code>\n"
+        "Tips: Kamu juga bisa pakai perintah cepat:\n"
+        "<code>copyadd LEADER RATIO MAX_SOL</code>\n"
+        "<code>copyon LEADER</code> / <code>copyoff LEADER</code> / <code>copyrm LEADER</code>\n"
     )
-    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
-    ]))
 
+    # tombol global
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Leader", callback_data="copy_add_wizard"),
+         InlineKeyboardButton("↻ Refresh", callback_data="copy_menu")],
+        *kb_rows,
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
+    ]
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    
 def _is_pubkey(x: str) -> bool:
     try:
         import base58
@@ -524,6 +541,97 @@ async def handle_copy_text_commands(update: Update, context: ContextTypes.DEFAUL
         database.copy_follow_remove(user_id, leader)
         await update.message.reply_html("🗑️ Copy-follow removed.", reply_markup=back_markup("back_to_main_menu"))
         return
+
+async def handle_copy_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    leader = q.data.split(":", 1)[1]
+    # baca state lalu toggle
+    exists = False
+    for f in database.copy_follow_list_for_user(user_id) or []:
+        if f["leader_address"] == leader:
+            exists = True
+            database.copy_follow_upsert(user_id, leader, active=not f.get("active", True))
+            break
+    if not exists:
+        await q.edit_message_text("❌ Leader not found.", reply_markup=back_markup("copy_menu"))
+        return
+    await handle_copy_menu(update, context)
+
+async def handle_copy_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    leader = q.data.split(":", 1)[1]
+    database.copy_follow_remove(user_id, leader)
+    await handle_copy_menu(update, context)
+
+async def copy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    context.user_data.pop("copy_leader", None)
+    context.user_data.pop("copy_ratio", None)
+    await q.edit_message_text(
+        "🧭 <b>Add Leader</b>\nKirim <b>public key</b> wallet yang ingin kamu copy.",
+        parse_mode="HTML",
+        reply_markup=back_markup("copy_menu"),
+    )
+    return COPY_AWAIT_LEADER
+
+async def copy_add_leader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    leader = (update.message.text or "").strip()
+    if not _is_pubkey(leader):
+        await update.message.reply_html("❌ Invalid pubkey. Coba lagi.", reply_markup=back_markup("copy_menu"))
+        return COPY_AWAIT_LEADER
+    context.user_data["copy_leader"] = leader
+    await update.message.reply_html(
+        "✅ Leader diterima.\n\nSekarang kirim <b>ratio</b> (mis. <code>1</code> untuk 1:1, <code>0.5</code> untuk setengah).",
+        reply_markup=back_markup("copy_menu"),
+    )
+    return COPY_AWAIT_RATIO
+
+async def copy_add_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        ratio = float((update.message.text or "").strip())
+        if ratio <= 0 or ratio > 100:
+            raise ValueError()
+    except Exception:
+        await update.message.reply_html("❌ Ratio tidak valid. Contoh: <code>1</code> atau <code>0.5</code>.",
+                                       reply_markup=back_markup("copy_menu"))
+        return COPY_AWAIT_RATIO
+    context.user_data["copy_ratio"] = ratio
+    await update.message.reply_html(
+        "👌 Sekarang kirim <b>max SOL per trade</b> (mis. <code>0.25</code>).",
+        reply_markup=back_markup("copy_menu"),
+    )
+    return COPY_AWAIT_MAX
+
+async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        max_sol = float((update.message.text or "").strip())
+        if max_sol <= 0 or max_sol > 1000:
+            raise ValueError()
+    except Exception:
+        await update.message.reply_html("❌ Max SOL tidak valid. Contoh: <code>0.25</code>.",
+                                       reply_markup=back_markup("copy_menu"))
+        return COPY_AWAIT_MAX
+
+    user_id = update.effective_user.id
+    leader = context.user_data.get("copy_leader")
+    ratio  = context.user_data.get("copy_ratio", 1.0)
+
+    database.copy_follow_upsert(user_id, leader, ratio=ratio, max_sol_per_trade=max_sol, active=True)
+
+    # bersihkan context & kembali ke menu
+    context.user_data.pop("copy_leader", None)
+    context.user_data.pop("copy_ratio", None)
+
+    await update.message.reply_html("✅ Leader ditambahkan & diaktifkan.", reply_markup=back_markup("copy_menu"))
+    # refresh menu
+    fake_cb = Update(update.update_id, callback_query=update.to_dict().get("callback_query"))
+    await handle_copy_menu(update, context)  # atau cukup biarkan user klik Back
+    return ConversationHandler.END
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_context(context)
@@ -1419,25 +1527,65 @@ def main() -> None:
         per_message=False
     )
 
+    copy_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(copy_add_start, pattern="^copy_add_wizard$")],
+        states={
+            COPY_AWAIT_LEADER: [MessageHandler(filters.TEXT & ~filters.COMMAND, copy_add_leader)],
+            COPY_AWAIT_RATIO:  [MessageHandler(filters.TEXT & ~filters.COMMAND, copy_add_ratio)],
+            COPY_AWAIT_MAX:    [MessageHandler(filters.TEXT & ~filters.COMMAND, copy_add_max)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"),
+            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+        ],
+        per_message=False,
+    )
+
+        # --- Copy wizard conversation ---
+    application.add_handler(copy_conv_handler)
+
+    # --- Copy menu & item actions (once only) ---
+    application.add_handler(CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"))
+    application.add_handler(CallbackQueryHandler(handle_copy_toggle, pattern=r"^copy_toggle:.+$"))
+    application.add_handler(CallbackQueryHandler(handle_copy_remove, pattern=r"^copy_remove:.+$"))
+
+    # --- Command & other conversations ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(trade_conv_handler)
-    application.add_handler(pumpfun_conv_handler) # <-- Menambahkan handler baru
+    application.add_handler(pumpfun_conv_handler)
+
+    # --- Other callback menus ---
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))
     application.add_handler(CallbackQueryHandler(handle_wallet_menu, pattern="^menu_wallet$"))
     application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*$"))
     application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"))
     application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="^import_wallet$"))
-    application.add_handler(
-        CallbackQueryHandler(
-            dummy_response, pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$"
-        )
-    )
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
-    application.add_handler(CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"))
-    application.add_handler(MessageHandler(filters.Regex(r"^(?i)(copyadd|copyon|copyoff|copyrm)\b"), handle_copy_text_commands))
+    application.add_handler(
+        CallbackQueryHandler(
+            dummy_response,
+            pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$",
+        )
+    )
 
+    # --- TEXT handlers (ORDER MATTERS!) ---
+    # 1) Tangkap dulu perintah copy* (case-insensitive)
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(r"(?i)^(copyadd|copyon|copyoff|copyrm)\b"),
+            handle_copy_text_commands,
+        )
+    )
+    # 2) Baru catch-all untuk teks lain, dan sekalian exclude perintah copy*
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT & ~filters.COMMAND) & ~filters.Regex(r"(?i)^(copyadd|copyon|copyoff|copyrm)\b"),
+            handle_text_commands,
+        )
+    )
+
+    # --- background worker: copy trading loop ---
     stop_event = asyncio.Event()
 
     async def _on_start(app: Application):
@@ -1451,5 +1599,6 @@ def main() -> None:
 
     print("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 if __name__ == "__main__":
     main()
