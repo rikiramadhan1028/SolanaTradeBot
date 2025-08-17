@@ -182,3 +182,69 @@ def delete_user_wallet(user_id: int) -> None:
 
 # Backward-compatible name, if other modules still import this:
 remove_wallet = delete_user_wallet
+
+# ==== Copy Trading collections ====
+# collection: copy_follows
+# doc: {
+#   user_id: int,
+#   leader_address: str,
+#   ratio: float,                # 1.0 = 100%
+#   max_sol_per_trade: float,    # cap buy per trade
+#   slippage_bps: int|None,
+#   follow_buys: bool,
+#   follow_sells: bool,
+#   active: bool,
+#   created_at: int,
+# }
+copy_follows = db["copy_follows"]
+copy_follows.create_index([("user_id", ASCENDING), ("leader_address", ASCENDING)], unique=True)
+
+# collection: copy_leaders (hanya untuk daftar leader yang ada minimal 1 follower aktif)
+# doc: { leader_address: str, active: bool }
+copy_leaders = db["copy_leaders"]
+copy_leaders.create_index([("leader_address", ASCENDING)], unique=True)
+
+def copy_follow_upsert(user_id: int, leader_address: str, *,
+                       ratio: float = 1.0,
+                       max_sol_per_trade: float = 0.5,
+                       slippage_bps: int | None = None,
+                       follow_buys: bool = True,
+                       follow_sells: bool = True,
+                       active: bool = True) -> None:
+    now = int(time.time())
+    copy_follows.update_one(
+        {"user_id": int(user_id), "leader_address": leader_address},
+        {"$set": {
+            "user_id": int(user_id),
+            "leader_address": leader_address,
+            "ratio": float(ratio),
+            "max_sol_per_trade": float(max_sol_per_trade),
+            "slippage_bps": int(slippage_bps) if slippage_bps is not None else None,
+            "follow_buys": bool(follow_buys),
+            "follow_sells": bool(follow_sells),
+            "active": bool(active),
+            "created_at": now,
+        }},
+        upsert=True,
+    )
+    # ensure leader record exists & active
+    copy_leaders.update_one(
+        {"leader_address": leader_address},
+        {"$set": {"leader_address": leader_address, "active": True}},
+        upsert=True,
+    )
+
+def copy_follow_remove(user_id: int, leader_address: str) -> None:
+    copy_follows.delete_one({"user_id": int(user_id), "leader_address": leader_address})
+    # if no more followers, optionally deactivate leader
+    if copy_follows.count_documents({"leader_address": leader_address}) == 0:
+        copy_leaders.update_one({"leader_address": leader_address}, {"$set": {"active": False}})
+
+def copy_follow_list_for_user(user_id: int) -> list[dict]:
+    return list(copy_follows.find({"user_id": int(user_id)}))
+
+def copy_follow_list_for_leader(leader_address: str) -> list[dict]:
+    return list(copy_follows.find({"leader_address": leader_address, "active": True}))
+
+def copy_leaders_active() -> list[dict]:
+    return list(copy_leaders.find({"active": True}))

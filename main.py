@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # main.py — RokuTrade Bot (secure + realtime SOL price)
-
 import os
 import json
 import re
@@ -8,6 +7,7 @@ import asyncio
 import httpx
 from datetime import datetime, timezone
 from typing import Optional
+from copy_trading import copytrading_loop
 
 # -------- env harus loaded SEBELUM os.getenv dipanggil --------
 from dotenv import load_dotenv
@@ -203,7 +203,7 @@ def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧾 Asset", callback_data="view_assets"),
         ],
         [
-            InlineKeyboardButton("📋 Copy Trading", callback_data="copy_trading"),
+            InlineKeyboardButton("📋 Copy Trading", callback_data="copy_menu"),
             InlineKeyboardButton("📉 Limit Order", callback_data="limit_order"),
             InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell"),
         ],
@@ -447,6 +447,83 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             msg += f"{float(t.get('amount',0)):.6f} <b>{label}</b>\n"
 
     await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ===== Copy Trading UI =====
+async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    follows = database.copy_follow_list_for_user(user_id)
+    if follows:
+        rows = []
+        for f in follows:
+            st = "ON" if f.get("active") else "OFF"
+            rows.append(f"• <code>{f['leader_address']}</code>  ratio={f.get('ratio',1.0)}  max={f.get('max_sol_per_trade',0.5)}  [{st}]")
+        body = "\n".join(rows)
+    else:
+        body = "No leaders yet."
+
+    text = (
+        "📋 <b>Copy Trading</b>\n\n"
+        f"{body}\n\n"
+        "Commands:\n"
+        "<code>copyadd LEADER_PUBKEY RATIO MAX_SOL</code>\n"
+        "  e.g. <code>copyadd 7N...Z 1.0 0.25</code>\n"
+        "<code>copyoff LEADER_PUBKEY</code> / <code>copyon LEADER_PUBKEY</code>\n"
+        "<code>copyrm LEADER_PUBKEY</code>\n"
+    )
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
+    ]))
+
+def _is_pubkey(x: str) -> bool:
+    try:
+        import base58
+        return 32 <= len(x) <= 44 and base58.b58decode(x) is not None
+    except Exception:
+        return False
+
+async def handle_copy_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tangkap perintah: copyadd, copyon, copyoff, copyrm."""
+    user_id = update.effective_user.id
+    txt = (update.message.text or "").strip()
+    parts = txt.split()
+    if not parts:
+        return
+    cmd = parts[0].lower()
+
+    if cmd == "copyadd" and len(parts) >= 4:
+        leader = parts[1].strip()
+        if not _is_pubkey(leader):
+            await update.message.reply_html("❌ Invalid leader pubkey.", reply_markup=back_markup("back_to_main_menu"))
+            return
+        try:
+            ratio = float(parts[2])
+            max_sol = float(parts[3])
+        except Exception:
+            await update.message.reply_html("❌ Usage: <code>copyadd LEADER_PUBKEY RATIO MAX_SOL</code>", reply_markup=back_markup("back_to_main_menu"))
+            return
+        database.copy_follow_upsert(user_id, leader, ratio=ratio, max_sol_per_trade=max_sol, active=True)
+        await update.message.reply_html("✅ Copy-follow added/updated.", reply_markup=back_markup("back_to_main_menu"))
+        return
+
+    if cmd == "copyon" and len(parts) == 2:
+        leader = parts[1].strip()
+        database.copy_follow_upsert(user_id, leader, active=True)
+        await update.message.reply_html("✅ Copy-follow turned ON.", reply_markup=back_markup("back_to_main_menu"))
+        return
+
+    if cmd == "copyoff" and len(parts) == 2:
+        leader = parts[1].strip()
+        database.copy_follow_upsert(user_id, leader, active=False)
+        await update.message.reply_html("✅ Copy-follow turned OFF.", reply_markup=back_markup("back_to_main_menu"))
+        return
+
+    if cmd == "copyrm" and len(parts) == 2:
+        leader = parts[1].strip()
+        database.copy_follow_remove(user_id, leader)
+        await update.message.reply_html("🗑️ Copy-follow removed.", reply_markup=back_markup("back_to_main_menu"))
+        return
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_context(context)
@@ -749,9 +826,9 @@ async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DE
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Trade has been cancelled.", reply_markup=back_markup("back_to_main_menu"))
+        await query.edit_message_text("Back To Home.", reply_markup=back_markup("back_to_main_menu"))
     elif update.message:
-        await update.message.reply_text("Trade has been cancelled.", reply_markup=back_markup("back_to_main_menu"))
+        await update.message.reply_text("Back To Home.", reply_markup=back_markup("back_to_main_menu"))
     return ConversationHandler.END
 
 # ================== Trading flows ==================
@@ -762,7 +839,7 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     keyboard = [
         [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
-        [InlineKeyboardButton("✈️ Copy Trade", callback_data="dummy_copy_trade")],
+        [InlineKeyboardButton("✈️ Copy Trade", callback_data="copy_menu")],
         [InlineKeyboardButton("🤖 Auto Trade - Pump.fun", callback_data="pumpfun_trade")],
         [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders"), InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell")],
         [InlineKeyboardButton("📈 Positions", callback_data="dummy_positions"), InlineKeyboardButton("👛 Wallet", callback_data="dummy_wallet"), InlineKeyboardButton("❓ Help", callback_data="dummy_help")],
@@ -1358,8 +1435,21 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
+    application.add_handler(CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"))
+    application.add_handler(MessageHandler(filters.Regex(r"^(?i)(copyadd|copyon|copyoff|copyrm)\b"), handle_copy_text_commands))
 
     print("Bot is running...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+stop_event = asyncio.Event()
+async def _on_start(app: Application):
+    app.job_queue.run_once(lambda *_: None, when=0)  # noop, memastikan job_queue aktif
+    asyncio.create_task(copytrading_loop(stop_event))
+
+async def _on_shutdown(app: Application):
+    stop_event.set()
+
+    Application.post_init = _on_start
+    Application.post_shutdown = _on_shutdown
+    Application.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__ == "__main__":
     main()
