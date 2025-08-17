@@ -20,8 +20,8 @@ TRADE_SVC_URL      = os.getenv("TRADE_SVC_URL", "http://localhost:8080").rstrip(
 # Optional platform fee (default OFF)
 # FEE_BPS: basis points, 100 = 1%
 FEE_BPS     = int(os.getenv("FEE_BPS", "0"))
-FEE_WALLET  = os.getenv("FEE_WALLET", "").strip()
-FEE_ENABLED = (FEE_BPS > 0) and bool(FEE_WALLET)
+FEE_WALLET  = (os.getenv("FEE_WALLET") or "").strip()
+FEE_ENABLED = FEE_BPS > 0 and len(FEE_WALLET) >= 32
 
 import config
 import database
@@ -107,6 +107,55 @@ async def reply_ok_html(message, text: str, prev_cb: str | None = None, signatur
 
 async def reply_err_html(message, text: str, prev_cb: str | None = None):
     await message.reply_html(text, reply_markup=back_markup(prev_cb))
+
+def _is_valid_pubkey(addr: str) -> bool:
+    if not addr or not (32 <= len(addr) <= 44):
+        return False
+    try:
+        import base58
+        base58.b58decode(addr)
+        return True
+    except Exception: # noqa
+        return False
+
+# hitung fee UI dari nilai UI
+def _fee_ui(val_ui: float) -> float:
+    try:
+        return max(0.0, float(val_ui) * (FEE_BPS / 10000.0))
+    except Exception:
+        return 0.0
+
+# pastikan fee yang dikirim tidak mengganggu biaya jaringan
+def _safe_fee_amount_ui(total_ui: float, want_fee_ui: float, *, keep_buffer_ui: float = 0.002) -> float:
+    # sisakan buffer untuk biaya jaringan & ATA (±0.002 SOL aman)
+    max_send = max(0.0, float(total_ui) - float(keep_buffer_ui))
+    return max(0.0, min(float(want_fee_ui), max_send))
+
+async def _send_fee_sol_if_any(private_key: str, have_ui: float, gain_ui: float, message, reason: str):
+    """
+    - BUY : panggil dengan have_ui = amount SOL sebelum swap, gain_ui = amount SOL yang user input
+    - SELL: panggil setelah swap; have_ui = post-swap SOL balance, gain_ui = (post - pre)
+    """
+    if not FEE_ENABLED:
+        return None
+    if not _is_valid_pubkey(FEE_WALLET):
+        await reply_err_html(message, "⚠️ FEE_WALLET invalid; fee skipped.", prev_cb="back_to_token_panel")
+        return None
+
+    want = _fee_ui(gain_ui)
+    fee_ui = _safe_fee_amount_ui(have_ui, want)
+    if fee_ui <= 0.00001:  # hindari dust
+        return None
+
+    tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
+    if isinstance(tx, str) and not tx.lower().startswith("error"):
+        # info tambahan ke user; swap tetap lanjut walaupun ini gagal
+        await reply_ok_html(message, f"💸 Platform fee ({reason}): {fee_ui:.6f} SOL sent.", signature=tx)
+        return tx
+    else:
+        await reply_err_html(message, f"⚠️ Fee transfer failed: {tx}", prev_cb="back_to_token_panel")
+        return None
+
 
 def format_usd(v: float | str) -> str:
     try:
@@ -884,50 +933,53 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     SOL_MINT = SOLANA_NATIVE_TOKEN_MINT
 
-    # ===================== BUY =====================
-    if trade_type == "buy":
-        amount_ui = float(amount)
-        swap_ui = amount_ui
-        if FEE_ENABLED:
-            fee_ui = _fee_ui(amount_ui)
-            buffer_ui = 0.002  # untuk fee/ATA
-            swap_ui = max(0.0, amount_ui - fee_ui - buffer_ui)
-            if swap_ui <= 0:
-                await reply_err_html(
-                    message,
-                    f"❌ Amount too small after platform fee ({fee_ui:.6f} SOL) and buffer.",
-                    prev_cb="back_to_token_panel",
-                )
-                return
-            fee_tx = solana_client.send_sol(wallet["private_key"], FEE_WALLET, fee_ui)
-            if not (isinstance(fee_tx, str) and not fee_tx.lower().startswith("error")):
-                await reply_err_html(message, f"❌ Fee transfer failed: {fee_tx}", prev_cb="back_to_token_panel")
-                return
-            await reply_ok_html(message, f"💸 Platform fee (BUY): {fee_ui:.6f} SOL sent.", signature=fee_tx)
-
-        input_mint       = SOL_MINT
+# ===================== BUY =====================
+    if trade_type == "buy": # noqa
+        input_mint       = SOLANA_NATIVE_TOKEN_MINT
         output_mint      = token_mint
         slippage_bps     = buy_slip_bps
-        amount_lamports  = int(float(swap_ui) * 1_000_000_000)
 
-        # pre-check SOL (friendly)
+        # total SOL yang di-input user
+        amount_ui = float(amount)
+
+        # cek saldo SOL awal (friendly)
         try:
-            sol_ui = await svc_get_sol_balance(wallet["address"])
-            need_ui = float(swap_ui) + 0.002
-            if sol_ui + 1e-9 < need_ui:
-                await reply_err_html(
-                    message,
-                    f"❌ Not enough SOL. Need ~{need_ui:.4f} SOL (amount + fees), you have {sol_ui:.4f} SOL.",
-                    prev_cb="back_to_token_panel",
-                )
-                return
+            sol_ui_before = await svc_get_sol_balance(wallet["address"])
         except Exception:
-            pass
+            sol_ui_before = 0.0
 
-    # ===================== SELL =====================
-    else:
-        input_mint  = token_mint
-        output_mint = SOL_MINT
+        if FEE_ENABLED:
+            # kirim fee dulu dari SOL sebelum swap
+            await _send_fee_sol_if_any(
+                private_key=wallet["private_key"],
+                have_ui=sol_ui_before,
+                gain_ui=amount_ui,
+                message=message,
+                reason="BUY"
+            )
+
+            # refresh saldo setelah fee
+            try:
+                sol_ui_before = await svc_get_sol_balance(wallet["address"])
+            except Exception:
+                pass
+
+        # sisakan buffer jaringan ~0.002 SOL
+        buffer_ui = 0.002
+        if sol_ui_before + 1e-9 < amount_ui + buffer_ui:
+            await reply_err_html(
+                message,
+                f"❌ Not enough SOL. Need ~{(amount_ui + buffer_ui):.4f} SOL (amount + fees), you have {sol_ui_before:.4f} SOL.",
+                prev_cb="back_to_token_panel",
+            )
+            return
+
+        amount_lamports = int(amount_ui * 1_000_000_000)
+
+# ===================== SELL =====================
+    else: # noqa
+        input_mint = token_mint
+        output_mint = SOLANA_NATIVE_TOKEN_MINT
         slippage_bps = sel_slip_bps
 
         try:
@@ -949,7 +1001,6 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 )
                 return
             sell_ui = token_balance_ui * (float(amount) / 100.0)
-            amount_lamports = int(sell_ui * (10 ** decimals))
         else:
             sell_ui = float(amount)
             if sell_ui > token_balance_ui + 1e-12:
@@ -959,23 +1010,18 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                     prev_cb="back_to_token_panel",
                 )
                 return
-            amount_lamports = int(sell_ui * (10 ** decimals))
 
-        if amount_lamports <= 0:
-            await reply_err_html(
-                message,
-                "❌ Sell amount too small.",
-                prev_cb="back_to_token_panel",
-            )
-            return
+        amount_lamports = int(sell_ui * (10 ** decimals))
 
-        # simpan SOL balance sebelum swap (untuk hitung fee sesudahnya)
+        # catat SOL sebelum swap (untuk fee post-swap)
         pre_sol_ui = 0.0
         if FEE_ENABLED:
             try:
                 pre_sol_ui = await svc_get_sol_balance(wallet["address"])
             except Exception:
                 pre_sol_ui = 0.0
+
+
 
     # Feedback ke user saat eksekusi
     await reply_ok_html(
@@ -1008,16 +1054,24 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             prev_cb="back_to_token_panel",
             signature=sig,
         )
-        # SELL fee post-swap
+        # SELL fee post-swap (setelah dapat res signature berhasil)
         if trade_type != "buy" and FEE_ENABLED:
             try:
-                await asyncio.sleep(1.2)  # beri waktu balance settle
+                await asyncio.sleep(1.5)  # beri waktu balance settle
                 post_sol_ui = await svc_get_sol_balance(wallet["address"])
                 delta_ui = max(0.0, post_sol_ui - pre_sol_ui)
                 if delta_ui > 0:
-                    await _send_fee_sol_if_any(wallet["private_key"], delta_ui, message, "SELL")
+                    # kirim fee dari hasil SOL yang baru masuk
+                    await _send_fee_sol_if_any(
+                        private_key=wallet["private_key"],
+                        have_ui=post_sol_ui,   # saldo saat ini
+                        gain_ui=delta_ui,      # hanya dari hasil swap
+                        message=message,
+                        reason="SELL"
+                    )
             except Exception as e:
                 await reply_err_html(message, f"⚠️ Fee check failed: {e}", prev_cb="back_to_token_panel")
+
     else:
         err = res.get("error") if isinstance(res, dict) else res
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
@@ -1056,7 +1110,8 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""))
         await update.message.reply_html(
             f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.",
-            reply_markup=back_markup("back_to_token_panel"),
+            # The reply_markup here should be the token_panel_keyboard, not back_markup
+            reply_markup=token_panel_keyboard(context),
         )
         await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
         return AWAITING_TRADE_ACTION
