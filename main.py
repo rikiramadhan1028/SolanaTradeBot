@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# main.py — RokuTrade Bot (secure revision)
+# main.py — RokuTrade Bot (secure + realtime SOL price)
 
 import os
 import json
@@ -115,47 +115,8 @@ def _is_valid_pubkey(addr: str) -> bool:
         import base58
         base58.b58decode(addr)
         return True
-    except Exception: # noqa
-        return False
-
-# hitung fee UI dari nilai UI
-def _fee_ui(val_ui: float) -> float:
-    try:
-        return max(0.0, float(val_ui) * (FEE_BPS / 10000.0))
     except Exception:
-        return 0.0
-
-# pastikan fee yang dikirim tidak mengganggu biaya jaringan
-def _safe_fee_amount_ui(total_ui: float, want_fee_ui: float, *, keep_buffer_ui: float = 0.002) -> float:
-    # sisakan buffer untuk biaya jaringan & ATA (±0.002 SOL aman)
-    max_send = max(0.0, float(total_ui) - float(keep_buffer_ui))
-    return max(0.0, min(float(want_fee_ui), max_send))
-
-async def _send_fee_sol_if_any(private_key: str, have_ui: float, gain_ui: float, message, reason: str):
-    """
-    - BUY : panggil dengan have_ui = amount SOL sebelum swap, gain_ui = amount SOL yang user input
-    - SELL: panggil setelah swap; have_ui = post-swap SOL balance, gain_ui = (post - pre)
-    """
-    if not FEE_ENABLED:
-        return None
-    if not _is_valid_pubkey(FEE_WALLET):
-        await reply_err_html(message, "⚠️ FEE_WALLET invalid; fee skipped.", prev_cb="back_to_token_panel")
-        return None
-
-    want = _fee_ui(gain_ui)
-    fee_ui = _safe_fee_amount_ui(have_ui, want)
-    if fee_ui <= 0.00001:  # hindari dust
-        return None
-
-    tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
-    if isinstance(tx, str) and not tx.lower().startswith("error"):
-        # info tambahan ke user; swap tetap lanjut walaupun ini gagal
-        await reply_ok_html(message, f"💸 Platform fee ({reason}): {fee_ui:.6f} SOL sent.", signature=tx)
-        return tx
-    else:
-        await reply_err_html(message, f"⚠️ Fee transfer failed: {tx}", prev_cb="back_to_token_panel")
-        return None
-
+        return False
 
 def format_usd(v: float | str) -> str:
     try:
@@ -191,7 +152,6 @@ async def get_dexscreener_stats(mint: str) -> dict:
             pairs = (data or {}).get("pairs") or []
             if not pairs:
                 return {}
-            # pilih pair ber-liquidity tertinggi
             pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0), reverse=True)
             p0 = pairs[0]
             base = p0.get("baseToken") or {}
@@ -208,7 +168,23 @@ async def get_dexscreener_stats(mint: str) -> dict:
     except Exception:
         return {}
 
-# ================== Start menu, wallet, etc ==================
+# ---- Realtime SOL/USD price ----
+async def get_sol_price_usd() -> float:
+    """Ambil harga SOL/USD realtime via Jupiter (fallback Dexscreener)."""
+    try:
+        p = await get_token_price(SOLANA_NATIVE_TOKEN_MINT)
+        price = float((p or {}).get("price", 0) if isinstance(p, dict) else p or 0)
+        if price > 0:
+            return price
+    except Exception:
+        pass
+    try:
+        ds = await get_dexscreener_stats(SOLANA_NATIVE_TOKEN_MINT)
+        return float(ds.get("priceUsd") or 0) if ds else 0.0
+    except Exception:
+        return 0.0
+
+# ================== Start menu, wallet, dll ==================
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
     if hasattr(context, "user_data"):
         context.user_data.clear()
@@ -240,19 +216,28 @@ def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str:
+    """Tampilkan saldo SOL + estimasi USD realtime di layar start/menu."""
     wallet_info = database.get_user_wallet(user_id)
     solana_address = wallet_info.get("address", "--")
+    sol_balance = None
     sol_balance_str = "--"
+    usd_str = "$~"
+
     if solana_address and solana_address != "--":
         try:
-            sol_balance = solana_client.get_balance(solana_address)
+            sol_balance = solana_client.get_balance(solana_address)  # float SOL
             sol_balance_str = f"{sol_balance:.4f} SOL"
+            sol_price = await get_sol_price_usd()
+            if sol_price > 0 and isinstance(sol_balance, (int, float)):
+                usd_str = format_usd(sol_balance * sol_price)
         except Exception:
             sol_balance_str = "Error"
+            usd_str = "N/A"
+
     return (
         f"👋 Hello {user_mention}! Welcome to <b>RokuTrade</b>\n\n"
         f"Wallet address: <code>{solana_address}</code>\n"
-        f"Wallet balance: <code>{sol_balance_str}</code> ($~)\n\n"
+        f"Wallet balance: <code>{sol_balance_str}</code> ({usd_str})\n\n"
         f"🔗 Referral link: https://t.me/RokuTrade?start=ref_{user_id}\n\n"
         f"✅ Send a contract address to start trading."
     )
@@ -401,10 +386,15 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     solana_address = wallet_info.get("address")
     sol_balance = "N/A"
 
+    # tampilkan SOL + USD realtime di assets juga
     if solana_address:
         try:
             sol_amount = solana_client.get_balance(solana_address)
-            sol_balance = f"{sol_amount:.6f} SOL"
+            sol_price  = await get_sol_price_usd()
+            if sol_price > 0:
+                sol_balance = f"{sol_amount:.6f} SOL  ({format_usd(sol_amount * sol_price)})"
+            else:
+                sol_balance = f"{sol_amount:.6f} SOL"
         except Exception as e:
             sol_balance = "Error"
             print(f"[Solana Balance Error] {e}")
@@ -933,38 +923,26 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     SOL_MINT = SOLANA_NATIVE_TOKEN_MINT
 
-# ===================== BUY =====================
-    if trade_type == "buy": # noqa
+    # ===================== BUY =====================
+    if trade_type == "buy":
         input_mint       = SOLANA_NATIVE_TOKEN_MINT
         output_mint      = token_mint
         slippage_bps     = buy_slip_bps
 
-        # total SOL yang di-input user
         amount_ui = float(amount)
 
-        # cek saldo SOL awal (friendly)
         try:
             sol_ui_before = await svc_get_sol_balance(wallet["address"])
         except Exception:
             sol_ui_before = 0.0
 
         if FEE_ENABLED:
-            # kirim fee dulu dari SOL sebelum swap
-            await _send_fee_sol_if_any(
-                private_key=wallet["private_key"],
-                have_ui=sol_ui_before,
-                gain_ui=amount_ui,
-                message=message,
-                reason="BUY"
-            )
-
-            # refresh saldo setelah fee
+            await _send_fee_sol_if_any(wallet["private_key"], amount_ui, message, "BUY")
             try:
                 sol_ui_before = await svc_get_sol_balance(wallet["address"])
             except Exception:
                 pass
 
-        # sisakan buffer jaringan ~0.002 SOL
         buffer_ui = 0.002
         if sol_ui_before + 1e-9 < amount_ui + buffer_ui:
             await reply_err_html(
@@ -976,8 +954,8 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
         amount_lamports = int(amount_ui * 1_000_000_000)
 
-# ===================== SELL =====================
-    else: # noqa
+    # ===================== SELL =====================
+    else:
         input_mint = token_mint
         output_mint = SOLANA_NATIVE_TOKEN_MINT
         slippage_bps = sel_slip_bps
@@ -1013,15 +991,12 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
         amount_lamports = int(sell_ui * (10 ** decimals))
 
-        # catat SOL sebelum swap (untuk fee post-swap)
         pre_sol_ui = 0.0
         if FEE_ENABLED:
             try:
                 pre_sol_ui = await svc_get_sol_balance(wallet["address"])
             except Exception:
                 pre_sol_ui = 0.0
-
-
 
     # Feedback ke user saat eksekusi
     await reply_ok_html(
@@ -1054,24 +1029,16 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             prev_cb="back_to_token_panel",
             signature=sig,
         )
-        # SELL fee post-swap (setelah dapat res signature berhasil)
+        # SELL fee post-swap
         if trade_type != "buy" and FEE_ENABLED:
             try:
-                await asyncio.sleep(1.5)  # beri waktu balance settle
+                await asyncio.sleep(1.5)
                 post_sol_ui = await svc_get_sol_balance(wallet["address"])
                 delta_ui = max(0.0, post_sol_ui - pre_sol_ui)
                 if delta_ui > 0:
-                    # kirim fee dari hasil SOL yang baru masuk
-                    await _send_fee_sol_if_any(
-                        private_key=wallet["private_key"],
-                        have_ui=post_sol_ui,   # saldo saat ini
-                        gain_ui=delta_ui,      # hanya dari hasil swap
-                        message=message,
-                        reason="SELL"
-                    )
+                    await _send_fee_sol_if_any(wallet["private_key"], delta_ui, message, "SELL")
             except Exception as e:
                 await reply_err_html(message, f"⚠️ Fee check failed: {e}", prev_cb="back_to_token_panel")
-
     else:
         err = res.get("error") if isinstance(res, dict) else res
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
@@ -1110,7 +1077,6 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""))
         await update.message.reply_html(
             f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.",
-            # The reply_markup here should be the token_panel_keyboard, not back_markup
             reply_markup=token_panel_keyboard(context),
         )
         await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
