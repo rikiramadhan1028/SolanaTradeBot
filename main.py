@@ -322,7 +322,7 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     balance_text = "N/A"
     if addr and addr != "--":
         try:
-            bal = solana_client.get_balance(addr)
+            bal = await svc_get_sol_balance(addr)
             balance_text = f"{bal:.4f} SOL"
         except Exception:
             balance_text = "Error"
@@ -1438,18 +1438,18 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"))
     application.add_handler(MessageHandler(filters.Regex(r"^(?i)(copyadd|copyon|copyoff|copyrm)\b"), handle_copy_text_commands))
 
+    stop_event = asyncio.Event()
+
+    async def _on_start(app: Application):
+        asyncio.create_task(copytrading_loop(stop_event))
+
+    async def _on_shutdown(app: Application):
+        stop_event.set()
+
+    application.post_init = _on_start
+    application.post_shutdown = _on_shutdown
+
     print("Bot is running...")
-    
-stop_event = asyncio.Event()
-async def _on_start(app: Application):
-    app.job_queue.run_once(lambda *_: None, when=0)  # noop, memastikan job_queue aktif
-    asyncio.create_task(copytrading_loop(stop_event))
-
-async def _on_shutdown(app: Application):
-    stop_event.set()
-
-    Application.post_init = _on_start
-    Application.post_shutdown = _on_shutdown
-    Application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__ == "__main__":
     main()
