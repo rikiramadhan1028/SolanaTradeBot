@@ -1019,19 +1019,30 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     # ===================== Call trade-svc (Jupiter) =====================
     try:
-        res = await dex_swap(
-            private_key=wallet["private_key"],
-            input_mint=input_mint,
-            output_mint=output_mint,
-            amount_lamports=amount_lamports,
-            dex=dex,
-            slippage_bps=slippage_bps,
-            priority_fee_sol=0.0,
-        )
+        if dex == "pumpfun":
+            res = await pumpfun_swap(
+                private_key=wallet["private_key"],
+                action=trade_type, # 'buy' or 'sell'
+                mint=token_mint,
+                amount=amount,  # SOL amount for buy, percentage for sell
+                slippage_bps=slippage_bps,
+                use_jito=False,
+            )
+        else: # Default to Jupiter
+            res = await dex_swap(
+                private_key=wallet["private_key"],
+                input_mint=input_mint,
+                output_mint=output_mint,
+                amount_lamports=amount_lamports,
+                dex=dex,
+                slippage_bps=slippage_bps,
+                priority_fee_sol=0.0,
+            )
     except Exception as e:
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(e))}", prev_cb="back_to_token_panel")
         clear_user_context(context)
-        return ConversationHandler.END
+        # Jangan return ConversationHandler.END di sini agar tidak error saat dipanggil di luar conversation
+        return
 
     if isinstance(res, dict) and res.get("signature"):
         sig = res["signature"]
@@ -1126,20 +1137,19 @@ async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEF
         )
         return PUMPFUN_AWAITING_TOKEN
 
-    context.user_data["pumpfun_token_address"] = token_address
-    context.user_data.setdefault("pumpfun_slippage_bps", 500)  # 5% default
+    context.user_data["token_address"] = token_address
+    context.user_data["selected_dex"] = "pumpfun" # PENTING: Tandai sebagai transaksi Pump.fun
+    context.user_data.setdefault("slippage_bps_buy", 500)  # 5% default
 
     panel_text = f"🤖 <b>Pump.fun Trade</b>\n\nToken: <code>{token_address}</code>"
     keyboard = [
         [
-            InlineKeyboardButton("Buy SOL", callback_data="pumpfun_buy"),
-            InlineKeyboardButton("Sell Tokens", callback_data="pumpfun_sell"),
+            InlineKeyboardButton("Buy (SOL)", callback_data="pumpfun_buy"),
+            InlineKeyboardButton("Sell (%)", callback_data="pumpfun_sell"),
         ],
         [
-            InlineKeyboardButton(
-                f"Slippage: {percent_label(context.user_data['pumpfun_slippage_bps'])}",
-                callback_data="pumpfun_set_slippage"
-            )
+             InlineKeyboardButton(f"Slippage: {percent_label(context.user_data['slippage_bps_buy'])}",
+                callback_data="pumpfun_set_slippage")
         ],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ]
@@ -1153,7 +1163,7 @@ async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TY
     action = query.data
 
     if action == "pumpfun_buy":
-        context.user_data["pumpfun_trade_type"] = "buy"
+        context.user_data["trade_type"] = "buy"
         keyboard = [
             [
                 InlineKeyboardButton("0.1 SOL", callback_data="pumpfun_buy_fixed_0.1"),
@@ -1174,7 +1184,8 @@ async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TY
         return PUMPFUN_AWAITING_BUY_AMOUNT
 
     elif action == "pumpfun_sell":
-        context.user_data["pumpfun_trade_type"] = "sell"
+        context.user_data["trade_type"] = "sell"
+        context.user_data["amount_type"] = "percentage"
         keyboard = [
             [
                 InlineKeyboardButton("10%", callback_data="pumpfun_sell_pct_10"),
@@ -1195,7 +1206,7 @@ async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TY
         return PUMPFUN_AWAITING_ACTION
 
 async def pumpfun_handle_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menangani input jumlah pembelian."""
+    """Menangani input jumlah pembelian dari tombol."""
     query = update.callback_query
     await query.answer()
 
@@ -1208,7 +1219,8 @@ async def pumpfun_handle_buy_amount(update: Update, context: ContextTypes.DEFAUL
     
     amount_str = query.data.split("_")[-1]
     amount = float(amount_str)
-    await pumpfun_execute_trade(update, context, amount)
+    context.user_data["trade_type"] = "buy"
+    await perform_trade(update, context, amount)
     return ConversationHandler.END
 
 async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1217,7 +1229,8 @@ async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.D
         amount = float(update.message.text.strip())
         if amount <= 0:
             raise ValueError()
-        await pumpfun_execute_trade(update, context, amount)
+        context.user_data["trade_type"] = "buy"
+        await perform_trade(update, context, amount)
         return ConversationHandler.END
     except (ValueError, IndexError):
         await update.message.reply_text(
@@ -1233,68 +1246,32 @@ async def pumpfun_handle_sell_percentage(update: Update, context: ContextTypes.D
     
     percentage_str = query.data.split("_")[-1]
     percentage = int(percentage_str)
-    await pumpfun_execute_trade(update, context, percentage)
+    context.user_data["trade_type"] = "sell"
+    context.user_data["amount_type"] = "percentage"
+    await perform_trade(update, context, percentage)
     return ConversationHandler.END
-
-async def pumpfun_execute_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float):
-    """Menjalankan transaksi Pump.fun."""
-    message = update.message if update.message else update.callback_query.message
-    user_id = update.effective_user.id
-    wallet = database.get_user_wallet(user_id)
-
-    if not wallet or not wallet.get("private_key"):
-        await reply_err_html(message, "❌ Wallet not found.", prev_cb="back_to_main_menu")
-        return
-        
-    trade_type = context.user_data.get("pumpfun_trade_type")
-    token_mint = context.user_data.get("pumpfun_token_address")
-    slippage_bps = context.user_data.get("pumpfun_slippage_bps", 500)
-
-    await reply_ok_html(message, f"⏳ Performing Pump.fun {trade_type.upper()}...")
-    
-    res = await pumpfun_swap(
-        private_key=wallet["private_key"],
-        action=trade_type,
-        mint=token_mint,
-        amount=amount, # This is SOL amount for buy, or percentage for sell
-        slippage_bps=slippage_bps,
-        use_jito=False,
-    )
-
-    if isinstance(res, dict) and not res.get("error") and (res.get("signature") or res.get("bundle")):
-        sig = res.get("signature") or res.get("bundle")
-        await reply_ok_html(message, f"✅ Pump.fun {trade_type} successful!", signature=sig, prev_cb="back_to_main_menu")
-    else:
-        err = res.get("error") if isinstance(res, dict) else str(res)
-        await reply_err_html(message, f"❌ Pump.fun {trade_type} failed: {short_err_text(err)}", prev_cb="back_to_main_menu")
-
-    clear_user_context(context)
 
 async def pumpfun_back_to_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Kembali ke panel perdagangan Pump.fun."""
     query = update.callback_query
     await query.answer()
-    token_address = context.user_data.get("pumpfun_token_address")
+    token_address = context.user_data.get("token_address")
 
     panel_text = f"🤖 <b>Pump.fun Trade</b>\n\nToken: <code>{token_address}</code>"
     keyboard = [
         [
-            InlineKeyboardButton("Buy SOL", callback_data="pumpfun_buy"),
-            InlineKeyboardButton("Sell Tokens", callback_data="pumpfun_sell"),
+            InlineKeyboardButton("Buy (SOL)", callback_data="pumpfun_buy"),
+            InlineKeyboardButton("Sell (%)", callback_data="pumpfun_sell"),
         ],
         [
-            InlineKeyboardButton(
-                f"Slippage: {percent_label(context.user_data.get('pumpfun_slippage_bps', 500))}",
-                callback_data="pumpfun_set_slippage"
-            )
+             InlineKeyboardButton(f"Slippage: {percent_label(context.user_data.get('slippage_bps_buy', 500))}",
+                callback_data="pumpfun_set_slippage")
         ],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ]
     await query.edit_message_text(panel_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return PUMPFUN_AWAITING_ACTION
 
-    clear_user_context(context)
-    return ConversationHandler.END
 
 # ================== App bootstrap ==================
 def main() -> None:
@@ -1335,35 +1312,39 @@ def main() -> None:
             CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
             CommandHandler("start", start),
         ],
+        per_message=False
     )
 
     pumpfun_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(pumpfun_trade_entry, pattern="^pumpfun_trade$")],
         states={
-        PUMPFUN_AWAITING_TOKEN: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, pumpfun_handle_token_address),
+            PUMPFUN_AWAITING_TOKEN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, pumpfun_handle_token_address),
+            ],
+            PUMPFUN_AWAITING_ACTION: [
+                CallbackQueryHandler(pumpfun_handle_action, pattern="^pumpfun_(buy|sell|set_slippage)$"),
+                CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$")
+            ],
+            PUMPFUN_AWAITING_BUY_AMOUNT: [
+                CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_fixed_.*$"),
+                CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_custom$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, pumpfun_handle_text_buy_amount),
+                CallbackQueryHandler(pumpfun_back_to_panel, pattern="^pumpfun_back_to_panel$"),
+            ],
+            PUMPFUN_AWAITING_SELL_PERCENTAGE: [
+                CallbackQueryHandler(pumpfun_handle_sell_percentage, pattern="^pumpfun_sell_pct_.*$"),
+                CallbackQueryHandler(pumpfun_back_to_panel, pattern="^pumpfun_back_to_panel$"),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
         ],
-        PUMPFUN_AWAITING_ACTION: [
-            CallbackQueryHandler(pumpfun_handle_action, pattern="^pumpfun_(buy|sell|set_slippage)$"),
-            CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$")
-        ],
-        PUMPFUN_AWAITING_BUY_AMOUNT: [
-            CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_fixed_.*$"),
-            CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_custom$"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, pumpfun_handle_text_buy_amount),
-            CallbackQueryHandler(pumpfun_back_to_panel, pattern="^pumpfun_back_to_panel$"),
-        ],
-        PUMPFUN_AWAITING_SELL_PERCENTAGE: [
-            CallbackQueryHandler(pumpfun_handle_sell_percentage, pattern="^pumpfun_sell_pct_.*$"),
-            CallbackQueryHandler(pumpfun_back_to_panel, pattern="^pumpfun_back_to_panel$"),
-        ],
-    },
-    fallbacks=[
-        CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-    ],
-)
+        per_message=False
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(trade_conv_handler)
+    application.add_handler(pumpfun_conv_handler) # <-- Menambahkan handler baru
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))
     application.add_handler(CallbackQueryHandler(handle_wallet_menu, pattern="^menu_wallet$"))
     application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*$"))
@@ -1376,11 +1357,9 @@ def main() -> None:
     )
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
-    # Catch-all text commands after conversations
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
-    application.add_handler(pumpfun_conv_handler)
+
     print("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 if __name__ == "__main__":
     main()
