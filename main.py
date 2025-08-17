@@ -925,46 +925,52 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     # ===================== BUY =====================
     if trade_type == "buy":
-        input_mint       = SOLANA_NATIVE_TOKEN_MINT
-        output_mint      = token_mint
-        slippage_bps     = buy_slip_bps
+        input_mint = SOLANA_NATIVE_TOKEN_MINT
+        output_mint = token_mint
+        slippage_bps = buy_slip_bps
 
-        amount_ui = float(amount)
+        # Jumlah total SOL yang dimasukkan pengguna
+        total_sol_to_spend = float(amount)
+        
+        # Hitung biaya terlebih dahulu
+        fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
+        
+        # Jumlah SOL yang sebenarnya untuk swap adalah total dikurangi biaya
+        actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
 
+        # Periksa saldo sebelum mengirim biaya
         try:
-            sol_ui_before = await svc_get_sol_balance(wallet["address"])
+            sol_balance = await svc_get_sol_balance(wallet["address"])
         except Exception:
-            sol_ui_before = 0.0
+            sol_balance = 0.0
 
-        if FEE_ENABLED:
-            await _send_fee_sol_if_any(wallet["private_key"], amount_ui, message, "BUY")
-            try:
-                sol_ui_before = await svc_get_sol_balance(wallet["address"])
-            except Exception:
-                pass
-
-        buffer_ui = 0.002
-        if sol_ui_before + 1e-9 < amount_ui + buffer_ui:
+        buffer_ui = 0.002 # Untuk biaya gas
+        if sol_balance < total_sol_to_spend + buffer_ui:
             await reply_err_html(
                 message,
-                f"❌ Not enough SOL. Need ~{(amount_ui + buffer_ui):.4f} SOL (amount + fees), you have {sol_ui_before:.4f} SOL.",
+                f"❌ Not enough SOL. Need ~{(total_sol_to_spend + buffer_ui):.4f} SOL (amount + fees), you have {sol_balance:.4f} SOL.",
                 prev_cb="back_to_token_panel",
             )
             return
 
-        amount_lamports = int(amount_ui * 1_000_000_000)
+        # Kirim biaya jika ada
+        if FEE_ENABLED and fee_amount_ui > 0:
+            await _send_fee_sol_if_any(wallet["private_key"], total_sol_to_spend, message, "BUY")
+
+        # Jumlah yang akan di-swap dalam lamports
+        amount_lamports = int(actual_swap_amount_ui * 1_000_000_000)
 
     # ===================== SELL =====================
     else:
         input_mint = token_mint
         output_mint = SOLANA_NATIVE_TOKEN_MINT
         slippage_bps = sel_slip_bps
-
+    
         try:
             decimals = int(await svc_get_mint_decimals(token_mint))
         except Exception:
             decimals = 6
-
+    
         try:
             token_balance_ui = float(await svc_get_token_balance(wallet["address"], token_mint))
         except Exception:
@@ -988,9 +994,9 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                     prev_cb="back_to_token_panel",
                 )
                 return
-
+    
         amount_lamports = int(sell_ui * (10 ** decimals))
-
+    
         pre_sol_ui = 0.0
         if FEE_ENABLED:
             try:
