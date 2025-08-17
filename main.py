@@ -67,7 +67,10 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
     AWAITING_AMOUNT,
     PUMPFUN_AWAITING_TOKEN,
     SET_SLIPPAGE,
-) = range(5)
+    PUMPFUN_AWAITING_ACTION,
+    PUMPFUN_AWAITING_BUY_AMOUNT,
+    PUMPFUN_AWAITING_SELL_PERCENTAGE,
+) = range(8)
 
 # ================== UI Helpers ==================
 def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
@@ -1098,64 +1101,197 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         return SET_SLIPPAGE
 
 # ----- Pump.fun flow -----
-async def handle_pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Titik masuk untuk alur Pump.fun."""
     clear_user_context(context)
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
         "🤖 <b>Pump.fun Auto Trade</b>\n\n"
-        "Please send the <b>token mint address</b> you want to auto trade.",
+        "Please send the <b>token mint address</b> you want to trade.",
         parse_mode="HTML",
         reply_markup=back_markup("back_to_main_menu"),
     )
     return PUMPFUN_AWAITING_TOKEN
 
-async def handle_pumpfun_trade_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    token_address = update.message.text.strip()
+async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Menangani alamat token dan menampilkan panel perdagangan."""
+    message = update.message
+    token_address = message.text.strip()
 
-    if len(token_address) < 32 or len(token_address) > 44:
-        await update.message.reply_text(
-            "❌ Invalid token address format. Please enter a valid Solana token address.",
+    if not _is_valid_pubkey(token_address):
+        await message.reply_text(
+            "❌ Invalid token address format.",
             reply_markup=back_markup("pumpfun_trade"),
         )
         return PUMPFUN_AWAITING_TOKEN
 
+    context.user_data["pumpfun_token_address"] = token_address
+    context.user_data.setdefault("pumpfun_slippage_bps", 500)  # 5% default
+
+    panel_text = f"🤖 <b>Pump.fun Trade</b>\n\nToken: <code>{token_address}</code>"
+    keyboard = [
+        [
+            InlineKeyboardButton("Buy SOL", callback_data="pumpfun_buy"),
+            InlineKeyboardButton("Sell Tokens", callback_data="pumpfun_sell"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"Slippage: {percent_label(context.user_data['pumpfun_slippage_bps'])}",
+                callback_data="pumpfun_set_slippage"
+            )
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
+    ]
+    await message.reply_html(panel_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return PUMPFUN_AWAITING_ACTION
+
+async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Menangani pilihan Beli atau Jual."""
+    query = update.callback_query
+    await query.answer()
+    action = query.data
+
+    if action == "pumpfun_buy":
+        context.user_data["pumpfun_trade_type"] = "buy"
+        keyboard = [
+            [
+                InlineKeyboardButton("0.1 SOL", callback_data="pumpfun_buy_fixed_0.1"),
+                InlineKeyboardButton("0.5 SOL", callback_data="pumpfun_buy_fixed_0.5"),
+                InlineKeyboardButton("1 SOL", callback_data="pumpfun_buy_fixed_1"),
+            ],
+            [
+                InlineKeyboardButton("2 SOL", callback_data="pumpfun_buy_fixed_2"),
+                InlineKeyboardButton("5 SOL", callback_data="pumpfun_buy_fixed_5"),
+                InlineKeyboardButton("X SOL...", callback_data="pumpfun_buy_custom"),
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data="pumpfun_back_to_panel")]
+        ]
+        await query.edit_message_text(
+            "Select amount to buy:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return PUMPFUN_AWAITING_BUY_AMOUNT
+
+    elif action == "pumpfun_sell":
+        context.user_data["pumpfun_trade_type"] = "sell"
+        keyboard = [
+            [
+                InlineKeyboardButton("10%", callback_data="pumpfun_sell_pct_10"),
+                InlineKeyboardButton("25%", callback_data="pumpfun_sell_pct_25"),
+                InlineKeyboardButton("50%", callback_data="pumpfun_sell_pct_50"),
+                InlineKeyboardButton("100%", callback_data="pumpfun_sell_pct_100"),
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data="pumpfun_back_to_panel")]
+        ]
+        await query.edit_message_text(
+            "Select percentage to sell:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return PUMPFUN_AWAITING_SELL_PERCENTAGE
+        
+    elif action == "pumpfun_set_slippage":
+        await query.answer("Slippage setting coming soon!", show_alert=True)
+        return PUMPFUN_AWAITING_ACTION
+
+async def pumpfun_handle_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Menangani input jumlah pembelian."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "pumpfun_buy_custom":
+        await query.edit_message_text(
+            "Enter amount of SOL to buy:",
+            reply_markup=back_markup("pumpfun_back_to_panel")
+        )
+        return PUMPFUN_AWAITING_BUY_AMOUNT
+    
+    amount_str = query.data.split("_")[-1]
+    amount = float(amount_str)
+    await pumpfun_execute_trade(update, context, amount)
+    return ConversationHandler.END
+
+async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Menangani input teks untuk jumlah pembelian kustom."""
+    try:
+        amount = float(update.message.text.strip())
+        if amount <= 0:
+            raise ValueError()
+        await pumpfun_execute_trade(update, context, amount)
+        return ConversationHandler.END
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            "❌ Invalid amount. Please enter a valid number.",
+            reply_markup=back_markup("pumpfun_back_to_panel"),
+        )
+        return PUMPFUN_AWAITING_BUY_AMOUNT
+
+async def pumpfun_handle_sell_percentage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Menangani input persentase penjualan."""
+    query = update.callback_query
+    await query.answer()
+    
+    percentage_str = query.data.split("_")[-1]
+    percentage = int(percentage_str)
+    await pumpfun_execute_trade(update, context, percentage)
+    return ConversationHandler.END
+
+async def pumpfun_execute_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float):
+    """Menjalankan transaksi Pump.fun."""
+    message = update.message if update.message else update.callback_query.message
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
-    if not wallet or not wallet["private_key"]:
-        await update.message.reply_text(
-            "❌ No Solana wallet found. Please create or import one first.",
-            reply_markup=back_markup("back_to_main_menu"),
-        )
-        return ConversationHandler.END
 
-    await update.message.reply_text(
-        f"⏳ Performing a Pump.fun BUY for `{token_address}` using 0.1 SOL ...",
-        reply_markup=back_markup("pumpfun_trade"),
-    )
+    if not wallet or not wallet.get("private_key"):
+        await reply_err_html(message, "❌ Wallet not found.", prev_cb="back_to_main_menu")
+        return
+        
+    trade_type = context.user_data.get("pumpfun_trade_type")
+    token_mint = context.user_data.get("pumpfun_token_address")
+    slippage_bps = context.user_data.get("pumpfun_slippage_bps", 500)
 
+    await reply_ok_html(message, f"⏳ Performing Pump.fun {trade_type.upper()}...")
+    
     res = await pumpfun_swap(
         private_key=wallet["private_key"],
-        action="buy",
-        mint=token_address,
-        amount=0.1,
+        action=trade_type,
+        mint=token_mint,
+        amount=amount, # This is SOL amount for buy, or percentage for sell
+        slippage_bps=slippage_bps,
         use_jito=False,
     )
 
     if isinstance(res, dict) and not res.get("error") and (res.get("signature") or res.get("bundle")):
-        if res.get("signature"):
-            sig = res["signature"]
-            await reply_ok_html(
-                update.message,
-                "✅ Pump.fun buy successful!",
-                prev_cb="back_to_main_menu",
-                signature=sig,
-            )
-        elif res.get("bundle"):
-            await reply_ok_html(update.message, "✅ Pump.fun bundle submitted to Jito.", prev_cb="back_to_main_menu")
+        sig = res.get("signature") or res.get("bundle")
+        await reply_ok_html(message, f"✅ Pump.fun {trade_type} successful!", signature=sig, prev_cb="back_to_main_menu")
     else:
-        err = res.get("error") if isinstance(res, dict) else res
-        await reply_err_html(update.message, f"❌ Pump.fun buy failed: {short_err_text(str(err))}", prev_cb="back_to_main_menu")
+        err = res.get("error") if isinstance(res, dict) else str(res)
+        await reply_err_html(message, f"❌ Pump.fun {trade_type} failed: {short_err_text(err)}", prev_cb="back_to_main_menu")
+
+    clear_user_context(context)
+
+async def pumpfun_back_to_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Kembali ke panel perdagangan Pump.fun."""
+    query = update.callback_query
+    await query.answer()
+    token_address = context.user_data.get("pumpfun_token_address")
+
+    panel_text = f"🤖 <b>Pump.fun Trade</b>\n\nToken: <code>{token_address}</code>"
+    keyboard = [
+        [
+            InlineKeyboardButton("Buy SOL", callback_data="pumpfun_buy"),
+            InlineKeyboardButton("Sell Tokens", callback_data="pumpfun_sell"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"Slippage: {percent_label(context.user_data.get('pumpfun_slippage_bps', 500))}",
+                callback_data="pumpfun_set_slippage"
+            )
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
+    ]
+    await query.edit_message_text(panel_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    return PUMPFUN_AWAITING_ACTION
 
     clear_user_context(context)
     return ConversationHandler.END
@@ -1171,7 +1307,6 @@ def main() -> None:
     trade_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(buy_sell, pattern="^buy_sell$"),
-            CallbackQueryHandler(handle_pumpfun_trade_entry, pattern="^pumpfun_trade$"),
         ],
         states={
             AWAITING_TOKEN_ADDRESS: [
@@ -1195,10 +1330,6 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_slippage_value),
                 CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
-            PUMPFUN_AWAITING_TOKEN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_trade_token),
-                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-            ],
         },
         fallbacks=[
             CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
@@ -1206,6 +1337,31 @@ def main() -> None:
         ],
     )
 
+    pumpfun_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(pumpfun_trade_entry, pattern="^pumpfun_trade$")],
+        states={
+        PUMPFUN_AWAITING_TOKEN: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, pumpfun_handle_token_address),
+        ],
+        PUMPFUN_AWAITING_ACTION: [
+            CallbackQueryHandler(pumpfun_handle_action, pattern="^pumpfun_(buy|sell|set_slippage)$"),
+            CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$")
+        ],
+        PUMPFUN_AWAITING_BUY_AMOUNT: [
+            CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_fixed_.*$"),
+            CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_custom$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, pumpfun_handle_text_buy_amount),
+            CallbackQueryHandler(pumpfun_back_to_panel, pattern="^pumpfun_back_to_panel$"),
+        ],
+        PUMPFUN_AWAITING_SELL_PERCENTAGE: [
+            CallbackQueryHandler(pumpfun_handle_sell_percentage, pattern="^pumpfun_sell_pct_.*$"),
+            CallbackQueryHandler(pumpfun_back_to_panel, pattern="^pumpfun_back_to_panel$"),
+        ],
+    },
+    fallbacks=[
+        CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+    ],
+)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(trade_conv_handler)
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))
@@ -1222,7 +1378,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
     # Catch-all text commands after conversations
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
-
+    application.add_handler(pumpfun_conv_handler)
     print("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
