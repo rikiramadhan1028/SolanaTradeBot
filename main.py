@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from copy_trading import copytrading_loop
 
-# -------- env harus loaded SEBELUM os.getenv dipanggil --------
+# -------- env must be loaded BEFORE os.getenv is called --------
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -73,6 +73,7 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
 ) = range(8)
 
 (COPY_AWAIT_LEADER, COPY_AWAIT_RATIO, COPY_AWAIT_MAX) = range(8, 11)
+
 # ================== UI Helpers ==================
 def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
     rows = []
@@ -174,7 +175,7 @@ async def get_dexscreener_stats(mint: str) -> dict:
 
 # ---- Realtime SOL/USD price ----
 async def get_sol_price_usd() -> float:
-    """Ambil harga SOL/USD realtime via Jupiter (fallback Dexscreener)."""
+    """Fetch real-time SOL/USD price via Jupiter (fallback Dexscreener)."""
     try:
         p = await get_token_price(SOLANA_NATIVE_TOKEN_MINT)
         price = float((p or {}).get("price", 0) if isinstance(p, dict) else p or 0)
@@ -188,7 +189,7 @@ async def get_sol_price_usd() -> float:
     except Exception:
         return 0.0
 
-# ================== Start menu, wallet, dll ==================
+# ================== Start menu, wallet, etc ==================
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
     if hasattr(context, "user_data"):
         context.user_data.clear()
@@ -220,7 +221,7 @@ def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str:
-    """Tampilkan saldo SOL + estimasi USD realtime di layar start/menu."""
+    """Display real-time SOL balance + USD estimate on the start/menu screen."""
     wallet_info = database.get_user_wallet(user_id)
     solana_address = wallet_info.get("address", "--")
     sol_balance = None
@@ -310,7 +311,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
     ])
     kb.append([
         InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu"),
-        InlineKeyboardButton("🏠 Menu",  callback_data="back_to_main_menu"),
+        InlineKeyboardButton("🏠 Menu",   callback_data="back_to_main_menu"),
     ])
     return InlineKeyboardMarkup(kb)
 
@@ -366,7 +367,7 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     lines.append("")
     lines.append(f"<a href=\"{dexscreener_url(mint)}\">{mint[:4]}…{mint[-4:]}</a>")
     lines.append(f"• SOL Balance: {balance_text}")
-    lines.append(f"• Price: {price_text}  LP: {lp_text}  MC: {mc_text}")
+    lines.append(f"• Price: {price_text}   LP: {lp_text}   MC: {mc_text}")
     lines.append("• Raydium CPMM")
     lines.append(f'• <a href="{dexscreener_url(mint)}">DEX Screener</a>')
     lines.append("")
@@ -390,7 +391,7 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     solana_address = wallet_info.get("address")
     sol_balance = "N/A"
 
-    # tampilkan SOL + USD realtime di assets juga
+    # also display real-time SOL + USD in assets
     if solana_address:
         try:
             sol_amount = await svc_get_sol_balance(solana_address)
@@ -411,7 +412,7 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
     ]
 
-    # Pakai Node/web3.js agar Token-2022 juga kebaca
+    # Use Node/web3.js so Token-2022 is also read
     try:
         tokens = await svc_get_token_balances(solana_address, min_amount=0.0000001) if solana_address else []
     except Exception as e:
@@ -467,7 +468,7 @@ async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             mx = f.get("max_sol_per_trade", 0.5)
             rows.append(f"• <code>{leader}</code>  r={ratio:g}  max={mx:g}  [{st}]")
 
-            # tombol ON/OFF + Remove untuk tiap leader
+            # ON/OFF + Remove buttons for each leader
             kb_rows.append([
                 InlineKeyboardButton("Toggle ON/OFF", callback_data=f"copy_toggle:{leader}"),
                 InlineKeyboardButton("🗑️ Remove", callback_data=f"copy_remove:{leader}"),
@@ -479,12 +480,12 @@ async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text = (
         "📋 <b>Copy Trading</b>\n\n"
         f"{body}\n\n"
-        "Tips: Kamu juga bisa pakai perintah cepat:\n"
+        "Tip: You can also use quick commands:\n"
         "<code>copyadd LEADER RATIO MAX_SOL</code>\n"
         "<code>copyon LEADER</code> / <code>copyoff LEADER</code> / <code>copyrm LEADER</code>\n"
     )
 
-    # tombol global
+    # global buttons
     keyboard = [
         [InlineKeyboardButton("➕ Add Leader", callback_data="copy_add_wizard"),
          InlineKeyboardButton("↻ Refresh", callback_data="copy_menu")],
@@ -501,7 +502,7 @@ def _is_pubkey(x: str) -> bool:
         return False
 
 async def handle_copy_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tangkap perintah: copyadd, copyon, copyoff, copyrm."""
+    """Catch commands: copyadd, copyon, copyoff, copyrm."""
     user_id = update.effective_user.id
     txt = (update.message.text or "").strip()
     parts = txt.split()
@@ -547,7 +548,7 @@ async def handle_copy_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     user_id = q.from_user.id
     leader = q.data.split(":", 1)[1]
-    # baca state lalu toggle
+    # read state then toggle
     exists = False
     for f in database.copy_follow_list_for_user(user_id) or []:
         if f["leader_address"] == leader:
@@ -573,7 +574,7 @@ async def copy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("copy_leader", None)
     context.user_data.pop("copy_ratio", None)
     await q.edit_message_text(
-        "🧭 <b>Add Leader</b>\nKirim <b>public key</b> wallet yang ingin kamu copy.",
+        "🧭 <b>Add Leader</b>\nSend the <b>public key</b> of the wallet you want to copy.",
         parse_mode="HTML",
         reply_markup=back_markup("copy_menu"),
     )
@@ -582,11 +583,11 @@ async def copy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def copy_add_leader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     leader = (update.message.text or "").strip()
     if not _is_pubkey(leader):
-        await update.message.reply_html("❌ Invalid pubkey. Coba lagi.", reply_markup=back_markup("copy_menu"))
+        await update.message.reply_html("❌ Invalid pubkey. Please try again.", reply_markup=back_markup("copy_menu"))
         return COPY_AWAIT_LEADER
     context.user_data["copy_leader"] = leader
     await update.message.reply_html(
-        "✅ Leader diterima.\n\nSekarang kirim <b>ratio</b> (mis. <code>1</code> untuk 1:1, <code>0.5</code> untuk setengah).",
+        "✅ Leader accepted.\n\nNow send the <b>ratio</b> (e.g. <code>1</code> for 1:1, <code>0.5</code> for half).",
         reply_markup=back_markup("copy_menu"),
     )
     return COPY_AWAIT_RATIO
@@ -597,12 +598,12 @@ async def copy_add_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if ratio <= 0 or ratio > 100:
             raise ValueError()
     except Exception:
-        await update.message.reply_html("❌ Ratio tidak valid. Contoh: <code>1</code> atau <code>0.5</code>.",
-                                       reply_markup=back_markup("copy_menu"))
+        await update.message.reply_html("❌ Invalid ratio. Example: <code>1</code> or <code>0.5</code>.",
+                                        reply_markup=back_markup("copy_menu"))
         return COPY_AWAIT_RATIO
     context.user_data["copy_ratio"] = ratio
     await update.message.reply_html(
-        "👌 Sekarang kirim <b>max SOL per trade</b> (mis. <code>0.25</code>).",
+        "👌 Now send the <b>max SOL per trade</b> (e.g. <code>0.25</code>).",
         reply_markup=back_markup("copy_menu"),
     )
     return COPY_AWAIT_MAX
@@ -613,8 +614,8 @@ async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         if max_sol <= 0 or max_sol > 1000:
             raise ValueError()
     except Exception:
-        await update.message.reply_html("❌ Max SOL tidak valid. Contoh: <code>0.25</code>.",
-                                       reply_markup=back_markup("copy_menu"))
+        await update.message.reply_html("❌ Invalid max SOL. Example: <code>0.25</code>.",
+                                        reply_markup=back_markup("copy_menu"))
         return COPY_AWAIT_MAX
 
     user_id = update.effective_user.id
@@ -623,14 +624,14 @@ async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     database.copy_follow_upsert(user_id, leader, ratio=ratio, max_sol_per_trade=max_sol, active=True)
 
-    # bersihkan context & kembali ke menu
+    # clear context & return to menu
     context.user_data.pop("copy_leader", None)
     context.user_data.pop("copy_ratio", None)
 
-    await update.message.reply_html("✅ Leader ditambahkan & diaktifkan.", reply_markup=back_markup("copy_menu"))
+    await update.message.reply_html("✅ Leader added & activated.", reply_markup=back_markup("copy_menu"))
     # refresh menu
     fake_cb = Update(update.update_id, callback_query=update.to_dict().get("callback_query"))
-    await handle_copy_menu(update, context)  # atau cukup biarkan user klik Back
+    await handle_copy_menu(update, context)  # or just let the user click Back
     return ConversationHandler.END
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -655,11 +656,11 @@ async def handle_create_wallet_callback(update: Update, context: ContextTypes.DE
     user_id = query.from_user.id
     private_key_output, public_address = wallet_manager.create_solana_wallet()
     database.set_user_wallet(user_id, private_key_output, public_address)
-    # ⚠️ Tampilkan PK agar user bisa backup, tapi beri peringatan tegas
+    # ⚠️ Display PK so the user can back it up, but give a strong warning
     await query.edit_message_text(
         "🔐 <b>New Solana wallet created & saved.</b>\n"
         f"Address:\n<code>{public_address}</code>\n\n"
-        "⚠️ <b>Private Key (BACKUP & JANGAN BAGIKAN):</b>\n"
+        "⚠️ <b>Private Key (BACKUP & DO NOT SHARE):</b>\n"
         f"<code>{private_key_output}</code>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]),
@@ -854,7 +855,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         return
 
-    # slippage flow teks
+    # slippage text flow
     if context.user_data.get("awaiting_slippage_input"):
         await handle_set_slippage_value(update, context)
         return
@@ -874,7 +875,7 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode="HTML")
 
 async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # kembali ke mode input mint
+    # return to mint input mode
     clear_user_context(context)
     q = update.callback_query
     await q.answer()
@@ -934,9 +935,9 @@ async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DE
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Back To Home.", reply_markup=back_markup("back_to_main_menu"))
+        await query.edit_message_text("Trade has been cancelled.", reply_markup=back_markup("back_to_main_menu"))
     elif update.message:
-        await update.message.reply_text("Back To Home.", reply_markup=back_markup("back_to_main_menu"))
+        await update.message.reply_text("Trade has been cancelled.", reply_markup=back_markup("back_to_main_menu"))
     return ConversationHandler.END
 
 # ================== Trading flows ==================
@@ -1071,19 +1072,20 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, message, reas
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
     
     if isinstance(tx, str) and not tx.lower().startswith("error"):
-        # Pesan ke pengguna sudah dihapus, kita hanya print ke log
+        # Message to user has been removed, we only print to log
         print(f"✅ Platform fee successful. Signature: {tx}")
         return tx
     else:
-        # Pesan error ke pengguna juga dihapus
+        # Error message to user has also been removed
         print(f"⚠️ Platform fee transfer failed: {tx}")
         return None
+
 # ------------------------- Trade core -------------------------
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
     """
-    - BUY  : SOL -> token (fee diambil dari input SOL sebelum swap)
-    - SELL : token -> SOL (fee diambil dari hasil SOL sesudah swap)
-    - Balances/decimals via trade-svc (web3.js) agar akurat.
+    - BUY  : SOL -> token (fee is taken from the input SOL before the swap)
+    - SELL : token -> SOL (fee is taken from the resulting SOL after the swap)
+    - Balances/decimals via trade-svc (web3.js) for accuracy.
     """
     message = update.message if update.message else update.callback_query.message
 
@@ -1097,10 +1099,10 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         )
         return
 
-    trade_type   = (context.user_data.get("trade_type") or "").lower()          # "buy" | "sell"
-    amount_type  = (context.user_data.get("amount_type") or "").lower()         # "sol" | "percentage"
-    token_mint   = context.user_data.get("token_address")                       # mint string
-    dex          = "jupiter"
+    trade_type   = (context.user_data.get("trade_type") or "").lower()      # "buy" | "sell"
+    amount_type  = (context.user_data.get("amount_type") or "").lower()     # "sol" | "percentage"
+    token_mint   = context.user_data.get("token_address")                   # mint string
+    dex          = context.user_data.get("selected_dex", "jupiter")
     buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
     sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
 
@@ -1120,22 +1122,22 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         output_mint = token_mint
         slippage_bps = buy_slip_bps
 
-        # Jumlah total SOL yang dimasukkan pengguna
+        # Total SOL amount entered by the user
         total_sol_to_spend = float(amount)
         
-        # Hitung biaya terlebih dahulu
+        # Calculate fee first
         fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
         
-        # Jumlah SOL yang sebenarnya untuk swap adalah total dikurangi biaya
+        # The actual SOL amount for the swap is the total minus the fee
         actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
 
-        # Periksa saldo sebelum mengirim biaya
+        # Check balance before sending the fee
         try:
             sol_balance = await svc_get_sol_balance(wallet["address"])
         except Exception:
             sol_balance = 0.0
 
-        buffer_ui = 0.002 # Untuk biaya gas
+        buffer_ui = 0.002 # For gas fees
         if sol_balance < total_sol_to_spend + buffer_ui:
             await reply_err_html(
                 message,
@@ -1144,15 +1146,15 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             )
             return
 
-        # Kirim biaya jika ada
+        # Send fee if applicable
         if FEE_ENABLED and fee_amount_ui > 0:
             await _send_fee_sol_if_any(wallet["private_key"], total_sol_to_spend, message, "BUY")
 
-        # Jumlah yang akan di-swap dalam lamports
+        # Amount to swap in lamports
         amount_lamports = int(actual_swap_amount_ui * 1_000_000_000)
 
     # ===================== SELL =====================
-    else:
+    else: # trade_type == "sell"
         input_mint = token_mint
         output_mint = SOLANA_NATIVE_TOKEN_MINT
         slippage_bps = sel_slip_bps
@@ -1176,7 +1178,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 )
                 return
             sell_ui = token_balance_ui * (float(amount) / 100.0)
-        else:
+        else: # amount_type is 'sol' for Pump.fun, but not used for sell. this is for custom amount in tokens.
             sell_ui = float(amount)
             if sell_ui > token_balance_ui + 1e-12:
                 await reply_err_html(
@@ -1195,14 +1197,14 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             except Exception:
                 pre_sol_ui = 0.0
 
-    # Feedback ke user saat eksekusi
+    # Feedback to the user during execution
     await reply_ok_html(
         message,
-        f"⏳ Performing {trade_type} on `{token_mint}` …",
+        f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…",
         prev_cb="back_to_token_panel",
     )
 
-    # ===================== Call trade-svc (Jupiter) =====================
+    # ===================== Call trade-svc =====================
     try:
         if dex == "pumpfun":
             res = await pumpfun_swap(
@@ -1226,11 +1228,11 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     except Exception as e:
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(e))}", prev_cb="back_to_token_panel")
         clear_user_context(context)
-        # Jangan return ConversationHandler.END di sini agar tidak error saat dipanggil di luar conversation
+        # Do not return ConversationHandler.END here to avoid errors when called outside a conversation
         return
 
-    if isinstance(res, dict) and res.get("signature"):
-        sig = res["signature"]
+    if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
+        sig = res.get("signature") or res.get("bundle")
         await reply_ok_html(
             message,
             "✅ Swap successful!",
@@ -1252,8 +1254,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
 
     clear_user_context(context)
-    await reply_ok_html(message, "Done! What's next?", prev_cb=None)
-    return ConversationHandler.END
+
 
 # ----- Slippage set flow -----
 async def handle_set_slippage_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1296,9 +1297,10 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         )
         return SET_SLIPPAGE
 
-# ----- Pump.fun flow -----
+# ================== Pump.fun Trading Flow (NEW & COMPLETE) ==================
+
 async def pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Titik masuk untuk alur Pump.fun."""
+    """Entry point for the Pump.fun flow."""
     clear_user_context(context)
     query = update.callback_query
     await query.answer()
@@ -1311,7 +1313,7 @@ async def pumpfun_trade_entry(update: Update, context: ContextTypes.DEFAULT_TYPE
     return PUMPFUN_AWAITING_TOKEN
 
 async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menangani alamat token dan menampilkan panel perdagangan."""
+    """Handles the token address and displays the trade panel."""
     message = update.message
     token_address = message.text.strip()
 
@@ -1323,7 +1325,7 @@ async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEF
         return PUMPFUN_AWAITING_TOKEN
 
     context.user_data["token_address"] = token_address
-    context.user_data["selected_dex"] = "pumpfun" # PENTING: Tandai sebagai transaksi Pump.fun
+    context.user_data["selected_dex"] = "pumpfun" # IMPORTANT: Tag this as a Pump.fun transaction
     context.user_data.setdefault("slippage_bps_buy", 500)  # 5% default
 
     panel_text = f"🤖 <b>Pump.fun Trade</b>\n\nToken: <code>{token_address}</code>"
@@ -1342,7 +1344,7 @@ async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEF
     return PUMPFUN_AWAITING_ACTION
 
 async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menangani pilihan Beli atau Jual."""
+    """Handles the Buy or Sell choice."""
     query = update.callback_query
     await query.answer()
     action = query.data
@@ -1391,7 +1393,7 @@ async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TY
         return PUMPFUN_AWAITING_ACTION
 
 async def pumpfun_handle_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menangani input jumlah pembelian dari tombol."""
+    """Handles buy amount input from buttons."""
     query = update.callback_query
     await query.answer()
 
@@ -1409,7 +1411,7 @@ async def pumpfun_handle_buy_amount(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menangani input teks untuk jumlah pembelian kustom."""
+    """Handles text input for custom buy amount."""
     try:
         amount = float(update.message.text.strip())
         if amount <= 0:
@@ -1425,7 +1427,7 @@ async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.D
         return PUMPFUN_AWAITING_BUY_AMOUNT
 
 async def pumpfun_handle_sell_percentage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Menangani input persentase penjualan."""
+    """Handles sell percentage input."""
     query = update.callback_query
     await query.answer()
     
@@ -1437,7 +1439,7 @@ async def pumpfun_handle_sell_percentage(update: Update, context: ContextTypes.D
     return ConversationHandler.END
 
 async def pumpfun_back_to_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Kembali ke panel perdagangan Pump.fun."""
+    """Returns to the Pump.fun trade panel."""
     query = update.callback_query
     await query.answer()
     token_address = context.user_data.get("token_address")
@@ -1456,7 +1458,6 @@ async def pumpfun_back_to_panel(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     await query.edit_message_text(panel_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return PUMPFUN_AWAITING_ACTION
-
 
 # ================== App bootstrap ==================
 def main() -> None:
@@ -1541,7 +1542,7 @@ def main() -> None:
         per_message=False,
     )
 
-        # --- Copy wizard conversation ---
+    # --- Copy wizard conversation ---
     application.add_handler(copy_conv_handler)
 
     # --- Copy menu & item actions (once only) ---
@@ -1570,14 +1571,14 @@ def main() -> None:
     )
 
     # --- TEXT handlers (ORDER MATTERS!) ---
-    # 1) Tangkap dulu perintah copy* (case-insensitive)
+    # 1) First, catch copy* commands (case-insensitive)
     application.add_handler(
         MessageHandler(
             filters.Regex(r"(?i)^(copyadd|copyon|copyoff|copyrm)\b"),
             handle_copy_text_commands,
         )
     )
-    # 2) Baru catch-all untuk teks lain, dan sekalian exclude perintah copy*
+    # 2) Then, catch-all for other text, and also exclude copy* commands
     application.add_handler(
         MessageHandler(
             (filters.TEXT & ~filters.COMMAND) & ~filters.Regex(r"(?i)^(copyadd|copyon|copyoff|copyrm)\b"),

@@ -4,6 +4,8 @@ __pycache__/
 *.pyo
 *.pyd
 *.so
+*.backup
+*.backup1
 
 # ⛔ Virtual Environment
 venv/
