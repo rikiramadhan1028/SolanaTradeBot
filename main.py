@@ -225,7 +225,7 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
 
     if solana_address and solana_address != "--":
         try:
-            sol_balance = solana_client.get_balance(solana_address)  # float SOL
+            sol_balance = await svc_get_sol_balance(solana_address)  # float SOL
             sol_balance_str = f"{sol_balance:.4f} SOL"
             sol_price = await get_sol_price_usd()
             if sol_price > 0 and isinstance(sol_balance, (int, float)):
@@ -389,7 +389,7 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # tampilkan SOL + USD realtime di assets juga
     if solana_address:
         try:
-            sol_amount = solana_client.get_balance(solana_address)
+            sol_amount = await svc_get_sol_balance(solana_address)
             sol_price  = await get_sol_price_usd()
             if sol_price > 0:
                 sol_balance = f"{sol_amount:.6f} SOL  ({format_usd(sol_amount * sol_price)})"
