@@ -1,116 +1,145 @@
 # file: database.py
-"""
-Wallet storage for the Telegram bot.
+import os, time
+from typing import Optional, Dict, Any
 
-- If env MONGO_URL is present & reachable -> use MongoDB collection 'wallets'.
-- Else -> fall back to a local JSON file at data/wallets.json.
+from pymongo import MongoClient, ASCENDING
+from cryptography.fernet import Fernet
+from base64 import urlsafe_b64encode
+from hashlib import sha256
+from secrets import token_bytes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
 
-API expected by the bot:
-    get_user_wallet(user_id) -> {"private_key": str|None, "address": str|None}
-    set_user_wallet(user_id, private_key, address) -> None
-    delete_user_wallet(user_id) -> None
-"""
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB  = os.getenv("MONGO_DB", "soltrade")
+FERNET_KEY = os.getenv("FERNET_KEY")  # base64 urlsafe 32 bytes (Fernet)
 
-from __future__ import annotations
-import os
-import json
-import threading
-from typing import Dict, Optional
+if not MONGO_URI:
+    raise RuntimeError("MONGO_URI missing")
+if not FERNET_KEY:
+    raise RuntimeError("FERNET_KEY missing")
 
-# ---------- Mongo (optional) ----------
-_MONGO_URL = os.getenv("MONGO_URL")
-_col = None
-if _MONGO_URL:
+client = MongoClient(MONGO_URI, appname="RokuTrade")
+db = client[MONGO_DB]
+wallets = db["wallets"]
+wallets.create_index([("user_id", ASCENDING)], unique=True)
+
+# ------- crypto helpers -------
+_app_fernet = Fernet(FERNET_KEY.encode())
+
+def _derive_key_from_passphrase(passphrase: str, salt: bytes) -> bytes:
+    # 32-byte key via PBKDF2-HMAC-SHA256
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200_000)
+    return urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
+
+def _enc_with_app_key(plaintext: str) -> Dict[str, Any]:
+    token = _app_fernet.encrypt(plaintext.encode())
+    return {"v": 1, "enc": token.decode()}
+
+def _dec_with_app_key(data: Dict[str, Any]) -> str:
+    return _app_fernet.decrypt(data["enc"].encode()).decode()
+
+def _enc_with_user_pass(plaintext: str, passphrase: str) -> Dict[str, Any]:
+    salt = token_bytes(16)
+    k = _derive_key_from_passphrase(passphrase, salt)
+    f = Fernet(k)
+    token = f.encrypt(plaintext.encode())
+    return {"v": 2, "salt": salt.hex(), "enc": token.decode()}
+
+def _dec_with_user_pass(data: Dict[str, Any], passphrase: str) -> str:
+    salt = bytes.fromhex(data["salt"])
+    k = _derive_key_from_passphrase(passphrase, salt)
+    f = Fernet(k)
+    return f.decrypt(data["enc"].encode()).decode()
+
+# ------- public API -------
+
+def get_user_wallet(user_id: int) -> Dict[str, Any]:
+    """Return doc without exposing secret."""
+    doc = wallets.find_one({"user_id": int(user_id)}) or {}
+    if not doc:
+        return {}
+    # redact
+    return {
+        "user_id": doc["user_id"],
+        "address": doc.get("address"),
+        "has_secret": bool(doc.get("pk")),
+        "enc_v": (doc.get("pk") or {}).get("v"),
+        "has_passphrase": (doc.get("pk") or {}).get("v") == 2,
+        "updated_at": doc.get("updated_at"),
+    }
+
+def set_user_wallet(user_id: int, private_key_plain: str, address: str, passphrase: Optional[str] = None) -> None:
+    """Create/replace wallet for user; encrypt secret."""
+    user_id = int(user_id)
+    if passphrase:
+        pk = _enc_with_user_pass(private_key_plain, passphrase)
+    else:
+        pk = _enc_with_app_key(private_key_plain)
+    wallets.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "user_id": user_id,
+            "address": address,
+            "pk": pk,                     # encrypted secret
+            "addr_hash": sha256(address.encode()).hexdigest(),
+            "updated_at": int(time.time()),
+        }},
+        upsert=True,
+    )
+
+def migrate_plain_to_encrypted() -> int:
+    """
+    One-time migration if any doc still has 'private_key' plaintext -> move to pk(v=1).
+    Returns number of migrated docs.
+    """
+    cnt = 0
+    for doc in wallets.find({"private_key": {"$exists": True}}):
+        try:
+            pk_plain = doc["private_key"]
+            pk = _enc_with_app_key(pk_plain)
+            wallets.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"pk": pk, "updated_at": int(time.time())}, "$unset": {"private_key": ""}}
+            )
+            cnt += 1
+        except Exception:
+            continue
+    return cnt
+
+def get_private_key_decrypted(user_id: int, passphrase: Optional[str] = None) -> Optional[str]:
+    """
+    Decrypt secret in memory; returns None if wallet not found or passphrase required & not provided/wrong.
+    """
+    doc = wallets.find_one({"user_id": int(user_id)})
+    if not doc or "pk" not in doc:
+        return None
+    pk = doc["pk"]
+    v = pk.get("v")
     try:
-        from pymongo import MongoClient  # optional; falls back if not installed/reachable
-        _client = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=2000)
-        _client.admin.command("ping")  # raises if not reachable
+        if v == 1:
+            return _dec_with_app_key(pk)
+        elif v == 2:
+            if not passphrase:
+                return None
+            return _dec_with_user_pass(pk, passphrase)
+    except Exception:
+        return None
+    return None
 
-        # pick db from URL if present, otherwise default
-        try:
-            # if URL ends with /dbname use it; else default "soltrade"
-            db_name = _client.get_database().name  # may raise if none in URL
-            _db = _client[db_name]
-        except Exception:
-            _db = _client["soltrade"]
+def upgrade_to_passphrase(user_id: int, passphrase: str) -> bool:
+    """Re-encrypt existing secret with user passphrase."""
+    user_id = int(user_id)
+    doc = wallets.find_one({"user_id": user_id})
+    if not doc or "pk" not in doc:
+        return False
+    # decrypt with whatever it currently uses
+    cur_plain = get_private_key_decrypted(user_id, None)
+    if cur_plain is None:
+        return False
+    new_pk = _enc_with_user_pass(cur_plain, passphrase)
+    wallets.update_one({"user_id": user_id}, {"$set": {"pk": new_pk, "updated_at": int(time.time())}})
+    return True
 
-        _col = _db["wallets"]
-        _col.create_index("user_id", unique=True)
-        print("[database] Using MongoDB wallets collection.")
-    except Exception as e:
-        print(f"[database] MongoDB disabled (fallback to file): {e}")
-        _col = None
-
-# ---------- File fallback ----------
-_LOCK = threading.Lock()
-_DATA_DIR = os.getenv("DATA_DIR", "data")
-_DATA_PATH = os.path.join(_DATA_DIR, "wallets.json")
-
-
-def _ensure_file() -> None:
-    os.makedirs(_DATA_DIR, exist_ok=True)
-    if not os.path.exists(_DATA_PATH):
-        with open(_DATA_PATH, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-
-
-def _file_read() -> Dict[str, Dict[str, Optional[str]]]:
-    _ensure_file()
-    with open(_DATA_PATH, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except Exception:
-            return {}
-
-
-def _file_write(store: Dict[str, Dict[str, Optional[str]]]) -> None:
-    tmp = _DATA_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, _DATA_PATH)
-
-
-# ---------- Public API ----------
-def get_user_wallet(user_id: int) -> Dict[str, Optional[str]]:
-    """Return {"private_key": str|None, "address": str|None} for the given Telegram user_id."""
-    uid = int(user_id)
-    if _col is not None:
-        doc = _col.find_one({"user_id": uid}, {"_id": 0, "private_key": 1, "address": 1})
-        if doc:
-            return {"private_key": doc.get("private_key"), "address": doc.get("address")}
-        return {"private_key": None, "address": None}
-
-    with _LOCK:
-        store = _file_read()
-        doc = store.get(str(uid)) or {}
-        return {"private_key": doc.get("private_key"), "address": doc.get("address")}
-
-
-def set_user_wallet(user_id: int, private_key: str, address: str) -> None:
-    """Create or update wallet for user_id."""
-    uid = int(user_id)
-    if _col is not None:
-        _col.update_one(
-            {"user_id": uid},
-            {"$set": {"private_key": private_key, "address": address}},
-            upsert=True,
-        )
-        return
-
-    with _LOCK:
-        store = _file_read()
-        store[str(uid)] = {"private_key": private_key, "address": address}
-        _file_write(store)
-
-
-def delete_user_wallet(user_id: int) -> None:
-    """Delete wallet for user_id (no error if missing)."""
-    uid = int(user_id)
-    if _col is not None:
-        _col.delete_one({"user_id": uid})
-        return
-
-    with _LOCK:
-        store = _file_read()
-        store.pop(str(uid), None)
-        _file_write(store)
+def remove_wallet(user_id: int) -> None:
+    wallets.delete_one({"user_id": int(user_id)})

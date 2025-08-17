@@ -1,25 +1,27 @@
 # -*- coding: utf-8 -*-
-# main.py — RokuTrade Bot
+# main.py — RokuTrade Bot (secure revision)
 
 import os
 import json
 import re
-import asyncio, httpx
+import asyncio
+import httpx
 from datetime import datetime, timezone
 from typing import Optional
 
-# ---- env harus loaded SEBELUM os.getenv dipanggil ----
+# -------- env harus loaded SEBELUM os.getenv dipanggil --------
 from dotenv import load_dotenv
 load_dotenv()
 
-# ---- ENV ----
+# -------- ENV --------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TRADE_SVC_URL      = os.getenv("TRADE_SVC_URL", "http://localhost:8080")
+TRADE_SVC_URL      = os.getenv("TRADE_SVC_URL", "http://localhost:8080").rstrip("/")
 
-# Optional fee settings (default OFF)
-FEE_BPS     = int(os.getenv("FEE_BPS", "0"))            # e.g. 100 = 1%
-FEE_WALLET  = os.getenv("FEE_WALLET", "")               # treasury address
-FEE_ENABLED = FEE_BPS > 0 and bool(FEE_WALLET)
+# Optional platform fee (default OFF)
+# FEE_BPS: basis points, 100 = 1%
+FEE_BPS     = int(os.getenv("FEE_BPS", "0"))
+FEE_WALLET  = os.getenv("FEE_WALLET", "").strip()
+FEE_ENABLED = (FEE_BPS > 0) and bool(FEE_WALLET)
 
 import config
 import database
@@ -44,11 +46,12 @@ from services.trade_service import (
     svc_get_mint_decimals,
     svc_get_sol_balance,
     svc_get_token_balance,
+    svc_get_token_balances,
 )
 
-# ============ Price aggregator (Jupiter/Raydium/Pumpfun) ============
+# ============ Price aggregator ============
 from dex_integrations.price_aggregator import (
-    get_token_price,                      # Jupiter Price API
+    get_token_price,
     get_token_price_from_raydium,
     get_token_price_from_pumpfun,
 )
@@ -92,7 +95,7 @@ def short_err_text(err: str) -> str:
         return "Network error to aggregator."
     if "no route" in low or ("quote" in low and ("404" in low or "400" in low)):
         return "No route found."
-    if s.startswith("http") or s.startswith("HTTP"):
+    if s.startswith(("http", "HTTP")):
         return "Aggregator error."
     return (s[:200] + "…") if len(s) > 200 else s
 
@@ -108,14 +111,10 @@ async def reply_err_html(message, text: str, prev_cb: str | None = None):
 def format_usd(v: float | str) -> str:
     try:
         f = float(v)
-        if f == 0.0:
-            return "$0"
-        if f < 0.01:
-            return f"${f:.6f}"
-        if f < 1:
-            return f"${f:.4f}"
-        if f < 1000:
-            return f"${f:.2f}"
+        if f == 0.0:   return "$0"
+        if f < 0.01:   return f"${f:.6f}"
+        if f < 1:      return f"${f:.4f}"
+        if f < 1000:   return f"${f:.2f}"
         for s, m in [("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]:
             if f >= m:
                 return f"${f/m:.2f}{s}"
@@ -149,7 +148,7 @@ async def get_dexscreener_stats(mint: str) -> dict:
             base = p0.get("baseToken") or {}
             fdv = p0.get("fdv")
             if fdv is None:
-                fdv = p0.get("marketCap")  # fallback jika field yang tersedia marketCap
+                fdv = p0.get("marketCap")
             return {
                 "priceUsd": p0.get("priceUsd"),
                 "fdvUsd": fdv,
@@ -195,22 +194,19 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
     wallet_info = database.get_user_wallet(user_id)
     solana_address = wallet_info.get("address", "--")
     sol_balance_str = "--"
-
     if solana_address and solana_address != "--":
         try:
             sol_balance = solana_client.get_balance(solana_address)
             sol_balance_str = f"{sol_balance:.4f} SOL"
         except Exception:
             sol_balance_str = "Error"
-
-    welcome_text = (
+    return (
         f"👋 Hello {user_mention}! Welcome to <b>RokuTrade</b>\n\n"
         f"Wallet address: <code>{solana_address}</code>\n"
         f"Wallet balance: <code>{sol_balance_str}</code> ($~)\n\n"
         f"🔗 Referral link: https://t.me/RokuTrade?start=ref_{user_id}\n\n"
         f"✅ Send a contract address to start trading."
     )
-    return welcome_text
 
 def validate_and_clean_private_key(key_data: str) -> str:
     key_data = key_data.strip()
@@ -244,7 +240,6 @@ def validate_and_clean_private_key(key_data: str) -> str:
 def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     buy_bps = int(context.user_data.get("slippage_bps_buy", 500))   # default 5%
     sell_bps = int(context.user_data.get("slippage_bps_sell", 500)) # default 5%
-
     kb: list[list[InlineKeyboardButton]] = []
     kb.append([
         InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu"),
@@ -295,7 +290,7 @@ async def build_token_panel(user_id: int, mint: str) -> str:
         except Exception:
             balance_text = "Error"
 
-    # Price + meta: Dexscreener first, then fallbacks
+    # Price + meta
     price_text = "N/A"
     mc_text = "N/A"
     lp_text = "N/A"
@@ -373,19 +368,17 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
     ]
 
-    spl_tokens = []
+    # Pakai Node/web3.js agar Token-2022 juga kebaca
     try:
-        if solana_address:
-            spl_tokens = []  # prefer Node/web3.js? For now use python client:
-            spl_tokens = solana_client.get_spl_token_balances(solana_address)
+        tokens = await svc_get_token_balances(solana_address, min_amount=0.0000001) if solana_address else []
     except Exception as e:
-        print(f"[SPL Token Balance Error] {e}")
+        print(f"[svc tokens] {e}")
+        tokens = []
 
     async def fetch_token_meta(mint: str) -> dict:
         try:
-            url = f"{TRADE_SVC_URL}/meta/token/{mint}"
             async with httpx.AsyncClient(timeout=8.0) as s:
-                r = await s.get(url)
+                r = await s.get(f"{TRADE_SVC_URL}/meta/token/{mint}")
             if r.status_code == 200:
                 return r.json() or {}
         except Exception as e:
@@ -401,13 +394,15 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return name
         return mint[:6].upper()
 
-    if spl_tokens:
+    if tokens:
         msg += "\n\n🔹 <b>SPL Tokens</b>\n"
-        metas = await asyncio.gather(*(fetch_token_meta(t["mint"]) for t in spl_tokens), return_exceptions=True)
-        for t, m in zip(spl_tokens, metas):
-            meta = m if isinstance(m, dict) else {}
-            label = format_token_label(meta, t["mint"])
-            msg += f"{t['amount']:.6f} <b>{label}</b>\n"
+        mints = [t.get("mint") or t.get("mintAddress") for t in tokens if (t.get("amount") or 0) > 0]
+        metas = await asyncio.gather(*(fetch_token_meta(m) for m in mints), return_exceptions=True)
+        for t, meta in zip(tokens, metas):
+            if (t.get("amount") or 0) <= 0:
+                continue
+            label = format_token_label(meta if isinstance(meta, dict) else {}, t.get("mint") or t.get("mintAddress"))
+            msg += f"{float(t.get('amount',0)):.6f} <b>{label}</b>\n"
 
     await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -433,15 +428,14 @@ async def handle_create_wallet_callback(update: Update, context: ContextTypes.DE
     user_id = query.from_user.id
     private_key_output, public_address = wallet_manager.create_solana_wallet()
     database.set_user_wallet(user_id, private_key_output, public_address)
+    # ⚠️ Tampilkan PK agar user bisa backup, tapi beri peringatan tegas
     await query.edit_message_text(
-        f"Your new Solana wallet has been created and saved.\n"
-        f"Public Address: `{public_address}`\n"
-        f"**Private Key (SAVE EXTREMELY SECURELY):** `{private_key_output}`\n\n"
-        f"Return to the main menu to view balance.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]
-        ),
+        "🔐 <b>New Solana wallet created & saved.</b>\n"
+        f"Address:\n<code>{public_address}</code>\n\n"
+        "⚠️ <b>Private Key (BACKUP & JANGAN BAGIKAN):</b>\n"
+        f"<code>{private_key_output}</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]]),
     )
 
 async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -652,6 +646,28 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode="HTML")
 
+async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # kembali ke mode input mint
+    clear_user_context(context)
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "📄 Please send the <b>token contract address</b> you want to trade.",
+        parse_mode="HTML",
+        reply_markup=back_markup("back_to_main_menu"),
+    )
+    return AWAITING_TOKEN_ADDRESS
+
+async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer()
+    mint = context.user_data.get("token_address")
+    if not mint:
+        return await handle_back_to_buy_sell_menu(update, context)
+    panel = await build_token_panel(q.from_user.id, mint)
+    await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+    return AWAITING_TRADE_ACTION
+
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -747,11 +763,7 @@ async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAU
     await q.answer()
     mint = context.user_data.get("token_address")
     if not mint:
-        await q.edit_message_text(
-            "❌ No token mint in context.",
-            reply_markup=back_markup("back_to_buy_sell_menu"),
-        )
-        return AWAITING_TOKEN_ADDRESS
+        return await handle_back_to_buy_sell_menu(update, context)
     panel = await build_token_panel(q.from_user.id, mint)
     await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
     return AWAITING_TRADE_ACTION
@@ -806,6 +818,8 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 reply_markup=back_markup("back_to_token_panel"),
             )
             return AWAITING_AMOUNT
+        context.user_data["trade_type"] = context.user_data.get("trade_type", "buy")
+        context.user_data["amount_type"] = "sol"
         await perform_trade(update, context, amount)
     except (ValueError, IndexError):
         await update.message.reply_text(
@@ -837,7 +851,6 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, message, reas
 # ------------------------- Trade core -------------------------
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
     """
-    Robust trade executor:
     - BUY  : SOL -> token (fee diambil dari input SOL sebelum swap)
     - SELL : token -> SOL (fee diambil dari hasil SOL sesudah swap)
     - Balances/decimals via trade-svc (web3.js) agar akurat.
@@ -856,10 +869,10 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     trade_type   = (context.user_data.get("trade_type") or "").lower()          # "buy" | "sell"
     amount_type  = (context.user_data.get("amount_type") or "").lower()         # "sol" | "percentage"
-    token_mint   = context.user_data.get("token_address")                        # mint string
+    token_mint   = context.user_data.get("token_address")                       # mint string
     dex          = "jupiter"
-    buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))         # default 5%
-    sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))         # default 5%
+    buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
+    sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
 
     if not token_mint:
         await reply_err_html(
@@ -873,13 +886,11 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     # ===================== BUY =====================
     if trade_type == "buy":
-        # Optional fee (pre-charge)
         amount_ui = float(amount)
         swap_ui = amount_ui
         if FEE_ENABLED:
             fee_ui = _fee_ui(amount_ui)
-            # sisakan buffer 0.002 SOL untuk fee jaringan/ATA
-            buffer_ui = 0.002
+            buffer_ui = 0.002  # untuk fee/ATA
             swap_ui = max(0.0, amount_ui - fee_ui - buffer_ui)
             if swap_ui <= 0:
                 await reply_err_html(
@@ -888,7 +899,6 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                     prev_cb="back_to_token_panel",
                 )
                 return
-            # kirim fee dulu, jika gagal -> batalkan
             fee_tx = solana_client.send_sol(wallet["private_key"], FEE_WALLET, fee_ui)
             if not (isinstance(fee_tx, str) and not fee_tx.lower().startswith("error")):
                 await reply_err_html(message, f"❌ Fee transfer failed: {fee_tx}", prev_cb="back_to_token_panel")
@@ -898,9 +908,9 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         input_mint       = SOL_MINT
         output_mint      = token_mint
         slippage_bps     = buy_slip_bps
-        amount_lamports  = int(float(swap_ui) * 1_000_000_000)  # SOL -> lamports
+        amount_lamports  = int(float(swap_ui) * 1_000_000_000)
 
-        # pre-check saldo SOL (friendly)
+        # pre-check SOL (friendly)
         try:
             sol_ui = await svc_get_sol_balance(wallet["address"])
             need_ui = float(swap_ui) + 0.002
@@ -959,7 +969,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             )
             return
 
-        # baca SOL balance sebelum swap (untuk hitung fee sesudahnya)
+        # simpan SOL balance sebelum swap (untuk hitung fee sesudahnya)
         pre_sol_ui = 0.0
         if FEE_ENABLED:
             try:
@@ -1045,7 +1055,7 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         context.user_data.pop("slippage_target", None)
         panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""))
         await update.message.reply_html(
-            f"✅ Slippage {tgt.UPPER()} set to {pct:.0f}%.",
+            f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.",
             reply_markup=back_markup("back_to_token_panel"),
         )
         await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
@@ -1140,20 +1150,20 @@ def main() -> None:
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
             ],
             AWAITING_TRADE_ACTION: [
-                CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*|anti_mev_.*)$"),
-                # CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
+                CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*)$"),
+                CallbackQueryHandler(handle_back_to_buy_sell_menu, pattern="^back_to_buy_sell_menu$"),
+                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
                 CallbackQueryHandler(handle_refresh_token_panel, pattern="^token_panel_refresh$"),
                 CallbackQueryHandler(handle_set_slippage_entry, pattern="^set_(buy|sell)_slippage$"),
                 CallbackQueryHandler(handle_noop, pattern="^noop_.*$"),
                 CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
-                # CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
             AWAITING_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
             ],
             SET_SLIPPAGE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_slippage_value),
-                # CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
+                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
             PUMPFUN_AWAITING_TOKEN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_pumpfun_trade_token),
@@ -1180,6 +1190,7 @@ def main() -> None:
     )
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
+    # Catch-all text commands after conversations
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_commands))
 
     print("Bot is running...")
