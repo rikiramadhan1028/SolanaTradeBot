@@ -878,15 +878,18 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, message, reas
     fee_ui = _fee_ui(ui_amount)
     if fee_ui <= 0.00001:  # minimum to avoid dust/gas wasting
         return None
+        
+    print(f"Attempting to send {fee_ui:.6f} SOL fee ({reason}) to {FEE_WALLET}")
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
+    
     if isinstance(tx, str) and not tx.lower().startswith("error"):
-        await reply_ok_html(message, f"💸 Platform fee ({reason}): {fee_ui:.6f} SOL sent.", signature=tx)
+        # Pesan ke pengguna sudah dihapus, kita hanya print ke log
+        print(f"✅ Platform fee successful. Signature: {tx}")
         return tx
     else:
-        # jangan gagalkan swap hanya karena fee tx gagal
-        await reply_err_html(message, f"⚠️ Fee transfer failed: {tx}", prev_cb="back_to_token_panel")
+        # Pesan error ke pengguna juga dihapus
+        print(f"⚠️ Platform fee transfer failed: {tx}")
         return None
-
 # ------------------------- Trade core -------------------------
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
     """
