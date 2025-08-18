@@ -149,6 +149,24 @@ def percent_label(bps: int | None, default_pct: float = 5.0) -> str:
 def dexscreener_url(mint: str) -> str:
     return f"https://dexscreener.com/solana/{mint}"
 
+# ===== Assets view config =====
+ASSETS_PAGE_SIZE = 3         # small page biar pesan gak kepanjangan
+DEFAULT_DUST_USD = 1.0
+
+def format_pct(x: float | None) -> str:
+    try:
+        if x is None: return "—"
+        return f"{x*100:.2f}%"
+    except Exception:
+        return "—"
+
+def _sol_from_usd(usd: float, sol_price: float) -> float:
+    try:
+        if sol_price <= 0: return 0.0
+        return float(usd) / float(sol_price)
+    except Exception:
+        return 0.0
+
 # ================== Data Helpers (Dexscreener) ==================
 async def get_dexscreener_stats(mint: str) -> dict:
     """Return {priceUsd, fdvUsd, liquidityUsd, name, symbol} or {}."""
@@ -386,72 +404,299 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Entry Assets – set default state dan render halaman 1 (Detailed)."""
     clear_user_context(context)
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    wallet_info = database.get_user_wallet(user_id)
-    solana_address = wallet_info.get("address")
-    sol_balance = "N/A"
+    q = update.callback_query
+    await q.answer()
 
-    # also display real-time SOL + USD in assets
-    if solana_address:
-        try:
-            sol_amount = await svc_get_sol_balance(solana_address)
-            sol_price  = await get_sol_price_usd()
-            if sol_price > 0:
-                sol_balance = f"{sol_amount:.6f} SOL  ({format_usd(sol_amount * sol_price)})"
-            else:
-                sol_balance = f"{sol_amount:.6f} SOL"
-        except Exception as e:
-            sol_balance = "Error"
-            print(f"[Solana Balance Error] {e}")
+    st = context.user_data.setdefault("assets_state", {})
+    st.setdefault("page", 1)
+    st.setdefault("sort", "value")        # 'value' | 'alpha' | 'pct'
+    st.setdefault("hide_dust", True)
+    st.setdefault("dust_usd", DEFAULT_DUST_USD)
+    st.setdefault("detail", True)         # detailed cards on
+    st.setdefault("hidden_mints", set())  # per-session hidden
 
-    msg = "📊 <b>Your Asset Balances</b>\n\n"
-    msg += f"Solana: <code>{solana_address or '--'}</code>\n<b>↳ {sol_balance}</b>\n"
+    await _render_assets_detailed_view(q, context)
 
-    keyboard = [
-        [InlineKeyboardButton("🔁 Withdraw/Send", callback_data="send_asset")],
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
-    ]
+async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_TYPE):
+    """Render SPL tokens sebagai kartu detail ala screenshot."""
+    user_id = q_or_msg.from_user.id if hasattr(q_or_msg, "from_user") else context._user_id
+    w = database.get_user_wallet(user_id)
+    addr = (w or {}).get("address")
+    if not addr:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]])
+        await q_or_msg.edit_message_text("📊 <b>Your Asset Balances</b>\n\nNo wallet yet.", parse_mode="HTML", reply_markup=kb)
+        return
 
-    # Use Node/web3.js so Token-2022 is also read
+    st = context.user_data.get("assets_state", {})
+    page      = int(st.get("page", 1))
+    sort_key  = st.get("sort", "value")
+    hide_dust = bool(st.get("hide_dust", True))
+    dust_usd  = float(st.get("dust_usd", DEFAULT_DUST_USD))
+    hidden    = set(st.get("hidden_mints", set()))
+
+    # === SOL header ===
     try:
-        tokens = await svc_get_token_balances(solana_address, min_amount=0.0000001) if solana_address else []
-    except Exception as e:
-        print(f"[svc tokens] {e}")
+        sol_amount = await svc_get_sol_balance(addr)
+    except Exception:
+        sol_amount = 0.0
+    sol_price = await get_sol_price_usd()
+    sol_usd   = sol_amount * sol_price if sol_price > 0 else 0.0
+
+    # === tokens from svc ===
+    try:
+        tokens = await svc_get_token_balances(addr, min_amount=0.0000001)
+    except Exception:
         tokens = []
 
-    async def fetch_token_meta(mint: str) -> dict:
+    items = []
+    mints = []
+    for t in tokens or []:
+        mint = t.get("mint") or t.get("mintAddress")
+        amt  = float(t.get("amount", 0) or 0)
+        if not mint or amt <= 0: 
+            continue
+        if mint in hidden:
+            continue
+        mints.append(mint)
+        items.append({"mint": mint, "amount": amt})
+
+    # === meta & harga (Dexscreener → aggregator fallback) ===
+    async def meta_of(mint: str) -> dict:
         try:
             async with httpx.AsyncClient(timeout=8.0) as s:
                 r = await s.get(f"{TRADE_SVC_URL}/meta/token/{mint}")
             if r.status_code == 200:
                 return r.json() or {}
-        except Exception as e:
-            print(f"[meta] fetch error for {mint}: {e}")
+        except Exception:
+            pass
         return {}
 
-    def format_token_label(meta: dict, mint: str) -> str:
-        sym = (meta.get("symbol") or "").strip()
-        name = (meta.get("name") or "").strip()
-        if sym:
-            return sym
-        if name:
-            return name
-        return mint[:6].upper()
+    async def price_pack(mint: str) -> dict:
+        # coba Dexscreener dulu biar dapat LP & MC
+        ds = await get_dexscreener_stats(mint)
+        if ds:
+            return {
+                "price": float(ds.get("priceUsd") or 0) or 0.0,
+                "lp": float((ds.get("liquidityUsd") or 0) or 0.0),
+                "mc": float((ds.get("fdvUsd") or 0) or 0.0),
+            }
+        # fallback aggregator
+        px = 0.0; mc = 0.0
+        try:
+            p = await get_token_price(mint)
+            px = float((p or {}).get("price", 0) if isinstance(p, dict) else p or 0)
+            mc = float((p or {}).get("mc", 0)) if isinstance(p, dict) else 0.0
+        except Exception:
+            pass
+        if px <= 0:
+            try:
+                p = await get_token_price_from_raydium(mint); px = float(p.get("price",0) or 0)
+            except Exception: pass
+        if px <= 0:
+            try:
+                p = await get_token_price_from_pumpfun(mint); px = float(p.get("price",0) or 0)
+            except Exception: pass
+        return {"price": px, "lp": 0.0, "mc": mc}
 
-    if tokens:
-        msg += "\n\n🔹 <b>SPL Tokens</b>\n"
-        mints = [t.get("mint") or t.get("mintAddress") for t in tokens if (t.get("amount") or 0) > 0]
-        metas = await asyncio.gather(*(fetch_token_meta(m) for m in mints), return_exceptions=True)
-        for t, meta in zip(tokens, metas):
-            if (t.get("amount") or 0) <= 0:
-                continue
-            label = format_token_label(meta if isinstance(meta, dict) else {}, t.get("mint") or t.get("mintAddress"))
-            msg += f"{float(t.get('amount',0)):.6f} <b>{label}</b>\n"
+    metas  = await asyncio.gather(*(meta_of(m) for m in mints), return_exceptions=True)
+    packs  = await asyncio.gather(*(price_pack(m) for m in mints), return_exceptions=True)
 
-    await query.edit_message_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    # optional positions (PNL/cost basis)
+    def _pos(mint: str) -> dict:
+        try:
+            doc = database.position_get(user_id, mint) or {}
+            # skema yang didukung (jika ada):
+            # { buy_sol, buy_tokens, buy_count, sell_sol, sell_tokens, sell_count,
+            #   realized_pnl_sol, avg_entry_price_usd, avg_entry_mc_usd }
+            return doc
+        except Exception:
+            return {}
+
+    # gabungkan
+    enriched = []
+    for it, meta, pack in zip(items, metas, packs):
+        meta = meta if isinstance(meta, dict) else {}
+        pack = pack if isinstance(pack, dict) else {"price": 0.0, "lp": 0.0, "mc": 0.0}
+        sym  = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or it["mint"][:6].upper()
+        px   = float(pack.get("price") or 0.0)
+        usd  = it["amount"] * px if px > 0 else 0.0
+        enriched.append({
+            **it,
+            "symbol": sym,
+            "price_usd": px,
+            "value_usd": usd,
+            "value_sol": _sol_from_usd(usd, sol_price),
+            "lp_usd": float(pack.get("lp") or 0.0),
+            "mc_usd": float(pack.get("mc") or 0.0),
+            "pos": _pos(it["mint"]),
+        })
+
+    # portfolio
+    tokens_total_usd = sum((x["value_usd"] for x in enriched), 0.0)
+    total_usd        = sol_usd + tokens_total_usd
+    for x in enriched:
+        x["pct"] = (x["value_usd"]/total_usd) if total_usd>0 and x["value_usd"]>0 else 0.0
+
+    # dust filter
+    filtered = [x for x in enriched if (x["value_usd"] >= dust_usd) or not hide_dust]
+
+    # sort
+    if sort_key == "alpha":
+        filtered.sort(key=lambda x: x["symbol"].upper())
+    elif sort_key == "pct":
+        filtered.sort(key=lambda x: x["pct"], reverse=True)
+    else:
+        filtered.sort(key=lambda x: x["value_usd"], reverse=True)
+
+    # paging
+    total_items = len(filtered)
+    total_pages = max(1, (total_items + ASSETS_PAGE_SIZE - 1) // ASSETS_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st["page"] = page
+    start = (page-1)*ASSETS_PAGE_SIZE
+    page_items = filtered[start:start+ASSETS_PAGE_SIZE]
+
+    # header
+    lines = []
+    lines.append("📊 <b>Your Asset Balances</b>\n")
+    lines.append(f"👛 <code>{addr}</code>")
+    lines.append(f"• SOL: <code>{sol_amount:.6f} SOL</code> ({format_usd(sol_usd)})  @ {format_usd(sol_price)}")
+    lines.append(f"• Tokens value: <b>{format_usd(tokens_total_usd)}</b>")
+    lines.append(f"• <b>Total Portfolio:</b> <b>{format_usd(total_usd)}</b>\n")
+
+    # token cards
+    if not page_items:
+        lines.append("(No tokens on this page)")
+    for x in page_items:
+        mint = x["mint"]; sym = x["symbol"]
+        val_sol = x["value_sol"]; val_usd = x["value_usd"]; price = x["price_usd"]
+        lp = x["lp_usd"]; mc = x["mc_usd"]; amt = x["amount"]
+        pos = x["pos"] or {}
+
+        # pnl (optional)
+        pnl_pct = None; pnl_sol = None
+        if pos:
+            # unrealized PnL jika ada avg_entry_price_usd
+            avg_px = pos.get("avg_entry_price_usd")
+            if isinstance(avg_px, (int, float)) and avg_px>0 and price>0:
+                cost_usd = amt * avg_px
+                pnl_usd = val_usd - cost_usd
+                pnl_sol = _sol_from_usd(pnl_usd, sol_price)
+                pnl_pct = (pnl_usd/cost_usd) if cost_usd>0 else None
+        # indikator
+        indicator = "📈" if (pnl_pct is not None and pnl_pct >= 0) else ("📉" if pnl_pct is not None else "📊")
+        danger = "🟩" if (pnl_pct is not None and pnl_pct >= 0) else ("🟥" if pnl_pct is not None else "")
+
+        lines.append(f"<b>${sym}</b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
+                     f"[<a href='tg://callback?component=hide'>Hide</a>]")  # label saja, tombol real di bawah
+        lines.append(f"<code>{mint}</code>(Tap to copy)")
+        if pnl_pct is not None:
+            lines.append(f"• PNL: {format_pct(pnl_pct)} "
+                         f"({(pnl_sol or 0):.3f} SOL/{format_usd((pnl_sol or 0)*sol_price)}) {danger}")
+        else:
+            lines.append("• PNL: —")
+        lines.append("[Share]")
+        avg_mc = pos.get("avg_entry_mc_usd")
+        avg_px = pos.get("avg_entry_price_usd")
+        lines.append(f"• Avg Entry: {format_usd(avg_px or 0)}  Avg Entry MC: {format_usd(avg_mc or 0)}")
+        lines.append(f"• Price: {format_usd(price)}  LP: {format_usd(lp)}  MC: {format_usd(mc)}")
+        buy_sol  = float(pos.get("buy_sol", 0) or 0);  buy_cnt  = int(pos.get("buy_count", 0) or 0)
+        sell_sol = float(pos.get("sell_sol", 0) or 0); sell_cnt = int(pos.get("sell_count", 0) or 0)
+        lines.append(f"• Balance: {amt:,.0f}")
+        lines.append(f"• Buy: {buy_sol:.3f} SOL ({buy_cnt} Buy)")
+        lines.append(f"• Sell: {sell_sol:.3f} SOL ({sell_cnt} Sell)")
+        lines.append(f"• <a href='{dexscreener_url(mint)}'>DEX Screener</a>\n")
+
+    text = "\n".join(lines)
+
+    # keyboard
+    sort_next = {"value": "alpha", "alpha": "pct", "pct": "value"}[sort_key]
+    sort_label = {"value": "Sort: Value", "alpha": "Sort: A→Z", "pct": "Sort: %Port"}[sort_key]
+    prev_btn = InlineKeyboardButton("⬅️ Prev", callback_data=f"assets_pg_{page-1}") if page>1 else None
+    next_btn = InlineKeyboardButton("Next ➡️", callback_data=f"assets_pg_{page+1}") if page<total_pages else None
+
+    row0 = [
+        InlineKeyboardButton("View: Detailed", callback_data="assets_view_detailed"),
+        InlineKeyboardButton("Compact", callback_data="assets_view_compact"),
+    ]
+    row1 = [
+        InlineKeyboardButton(f"{sort_label}", callback_data=f"assets_sort_{sort_next}"),
+        InlineKeyboardButton(("Show All" if hide_dust else "Hide Dust"), callback_data="assets_toggle_dust"),
+    ]
+    row2 = [b for b in (prev_btn, InlineKeyboardButton("↻ Refresh", callback_data="assets_refresh"), next_btn) if b]
+    # baris tombol contextual per kartu tidak bisa inline per baris di teks HTML,
+    # jadi kita sediakan “Hide / Share” via callback per-mint di bawah sebagai baris tambahan:
+    card_buttons = []
+    for x in page_items:
+        mint = x["mint"]
+        card_buttons.append([
+            InlineKeyboardButton(f"🔕 Hide {x['symbol']}", callback_data=f"assets_hide_{mint}"),
+            InlineKeyboardButton("🔗 Share", callback_data=f"assets_share_{mint}"),
+        ])
+
+    back = [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
+
+    kb_rows = [row0, row1]
+    if row2: kb_rows.append(row2)
+    kb_rows += card_buttons
+    kb_rows.append(back)
+    keyboard = InlineKeyboardMarkup(kb_rows)
+
+    if hasattr(q_or_msg, "edit_message_text"):
+        await q_or_msg.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
+    else:
+        await q_or_msg.message.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
+
+async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    st = context.user_data.setdefault("assets_state", {
+        "page": 1, "sort": "value", "hide_dust": True, "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
+    })
+    data = q.data
+
+    if data.startswith("assets_pg_"):
+        try:
+            st["page"] = max(1, int(data.rsplit("_",1)[1]))
+        except Exception:
+            pass
+
+    elif data == "assets_refresh":
+        pass
+
+    elif data == "assets_toggle_dust":
+        st["hide_dust"] = not bool(st.get("hide_dust", True))
+        st["page"] = 1
+
+    elif data.startswith("assets_sort_"):
+        st["sort"] = data.split("_",2)[2]
+        st["page"] = 1
+
+    elif data == "assets_view_compact":
+        st["detail"] = False
+        # jika mau, bisa panggil renderer compact lama (mis. _render_assets_view)
+        # sementara tetap gunakan detailed agar konsisten
+    elif data == "assets_view_detailed":
+        st["detail"] = True
+
+    elif data.startswith("assets_hide_"):
+        mint = data.split("_", 2)[2]
+        hidden = set(st.get("hidden_mints", set()))
+        hidden.add(mint)
+        st["hidden_mints"] = hidden
+
+    elif data.startswith("assets_share_"):
+        mint = data.split("_", 2)[2]
+        # kirim share card terpisah
+        try:
+            # cari data terakhir di state render dengan fetch ulang singkat hanya token itu
+            await q.message.reply_text(f"Mint: {mint}\nDexScreener: {dexscreener_url(mint)}\n(RokuTrade)", disable_web_page_preview=True)
+        except Exception:
+            pass
+
+    await _render_assets_detailed_view(q, context)
 
 # ===== Copy Trading UI =====
 async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1571,6 +1816,7 @@ def main() -> None:
 
     # --- Other callback menus ---
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))
+    application.add_handler(CallbackQueryHandler(handle_assets_callbacks, pattern=r"^assets_.*$"))
     application.add_handler(CallbackQueryHandler(handle_wallet_menu, pattern="^menu_wallet$"))
     application.add_handler(CallbackQueryHandler(handle_create_wallet_callback, pattern=r"^create_wallet:.*$"))
     application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"))
