@@ -567,6 +567,13 @@ async def handle_copy_remove(update: Update, context: ContextTypes.DEFAULT_TYPE)
     leader = q.data.split(":", 1)[1]
     database.copy_follow_remove(user_id, leader)
     await handle_copy_menu(update, context)
+    
+async def copy_add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the add-leader wizard and shows the copy menu."""
+    clear_user_context(context)
+    # This function is called via a callback query, so update.callback_query is guaranteed to exist.
+    await handle_copy_menu(update, context) # This will redraw the menu
+    return ConversationHandler.END
 
 async def copy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
@@ -630,9 +637,9 @@ async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     await update.message.reply_html("✅ Leader added & activated.", reply_markup=back_markup("copy_menu"))
     # refresh menu
-    fake_cb = Update(update.update_id, callback_query=update.to_dict().get("callback_query"))
-    await handle_copy_menu(update, context)  # or just let the user click Back
-    return ConversationHandler.END
+    #fake_cb = Update(update.update_id, callback_query=update.to_dict().get("callback_query"))
+    #await handle_copy_menu(update, context)  # or just let the user click Back
+    
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_context(context)
@@ -874,6 +881,11 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode="HTML")
 
+async def back_to_main_menu_and_end_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ends the conversation and shows the main menu."""
+    await back_to_main_menu(update, context)
+    return ConversationHandler.END
+
 async def handle_back_to_buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # return to mint input mode
     clear_user_context(context)
@@ -930,15 +942,7 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back_markup("back_to_main_menu"),
     )
 
-async def handle_cancel_in_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    clear_user_context(context)
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        await query.edit_message_text("Trade has been cancelled.", reply_markup=back_markup("back_to_main_menu"))
-    elif update.message:
-        await update.message.reply_text("Trade has been cancelled.", reply_markup=back_markup("back_to_main_menu"))
-    return ConversationHandler.END
+
 
 # ================== Trading flows ==================
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1475,7 +1479,7 @@ def main() -> None:
             AWAITING_TOKEN_ADDRESS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_address_for_trade),
                 CallbackQueryHandler(handle_dummy_trade_buttons, pattern=r"^(dummy_.*)$"),
-                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+
             ],
             AWAITING_TRADE_ACTION: [
                 CallbackQueryHandler(handle_buy_sell_action, pattern="^(buy_.*|sell_.*)$"),
@@ -1484,10 +1488,11 @@ def main() -> None:
                 CallbackQueryHandler(handle_refresh_token_panel, pattern="^token_panel_refresh$"),
                 CallbackQueryHandler(handle_set_slippage_entry, pattern="^set_(buy|sell)_slippage$"),
                 CallbackQueryHandler(handle_noop, pattern="^noop_.*$"),
-                CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+                
             ],
             AWAITING_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount),
+                CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
             ],
             SET_SLIPPAGE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_set_slippage_value),
@@ -1495,7 +1500,7 @@ def main() -> None:
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+            CallbackQueryHandler(back_to_main_menu_and_end_conv, pattern="^back_to_main_menu$"),
             CommandHandler("start", start),
         ],
         per_message=False
@@ -1509,7 +1514,7 @@ def main() -> None:
             ],
             PUMPFUN_AWAITING_ACTION: [
                 CallbackQueryHandler(pumpfun_handle_action, pattern="^pumpfun_(buy|sell|set_slippage)$"),
-                CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$")
+                                CallbackQueryHandler(back_to_main_menu_and_end_conv, pattern="^back_to_main_menu$")
             ],
             PUMPFUN_AWAITING_BUY_AMOUNT: [
                 CallbackQueryHandler(pumpfun_handle_buy_amount, pattern="^pumpfun_buy_fixed_.*$"),
@@ -1523,7 +1528,7 @@ def main() -> None:
             ],
         },
         fallbacks=[
-            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+            CallbackQueryHandler(back_to_main_menu_and_end_conv, pattern="^back_to_main_menu$"),
         ],
         per_message=False
     )
@@ -1536,8 +1541,8 @@ def main() -> None:
             COPY_AWAIT_MAX:    [MessageHandler(filters.TEXT & ~filters.COMMAND, copy_add_max)],
         },
         fallbacks=[
-            CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"),
-            CallbackQueryHandler(handle_cancel_in_conversation, pattern="^back_to_main_menu$"),
+            CallbackQueryHandler(copy_add_cancel, pattern="^copy_menu$"),
+            CallbackQueryHandler(back_to_main_menu_and_end_conv, pattern="^back_to_main_menu$"),
         ],
         per_message=False,
     )
