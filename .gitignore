@@ -11,10 +11,10 @@ __pycache__/
 venv/
 env/
 ENV/
+node_modules/
 .venv/
 .idea/
 .vscode/
-node_modules
 
 # ⛔ OS files
 .DS_Store
