@@ -151,7 +151,7 @@ def dexscreener_url(mint: str) -> str:
 
 # ===== Assets view config =====
 ASSETS_PAGE_SIZE = 3         # small page biar pesan gak kepanjangan
-DEFAULT_DUST_USD = 1.0
+DEFAULT_DUST_USD = 0.0
 
 def format_pct(x: float | None) -> str:
     try:
@@ -463,7 +463,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # set default state saat pertama buka
     st = context.user_data.setdefault("assets_state", {
-        "page": 1, "sort": "value", "hide_dust": True,
+        "page": 1, "sort": "value", "hide_dust": False,
         "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
     })
     # render detailed
@@ -498,7 +498,7 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
 
     # === tokens from svc ===
     try:
-        tokens = await svc_get_token_balances(addr, min_amount=0.0000001)
+        tokens = await svc_get_token_balances(addr, min_amount=0.0)
     except Exception:
         tokens = []
 
@@ -506,7 +506,7 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     mints = []
     for t in tokens or []:
         mint = t.get("mint") or t.get("mintAddress")
-        amt  = float(t.get("amount", 0) or 0)
+        amt  = float(t.get("amount") or t.get("uiAmount") or 0)
         if not mint or amt <= 0: 
             continue
         if mint in hidden:
@@ -675,7 +675,7 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     ]
     row1 = [
         InlineKeyboardButton(f"{sort_label}", callback_data=f"assets_sort_{sort_next}"),
-       
+        InlineKeyboardButton(("Hide Dust" if not hide_dust else "Show All"),callback_data="assets_toggle_dust"),
     ]
     row2 = [b for b in (prev_btn, InlineKeyboardButton("↻ Refresh", callback_data="assets_refresh"), next_btn) if b]
     # baris tombol contextual per kartu tidak bisa inline per baris di teks HTML,
@@ -705,7 +705,7 @@ async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_
     q = update.callback_query
     await q.answer()
     st = context.user_data.setdefault("assets_state", {
-        "page": 1, "sort": "value", "hide_dust": True, "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
+        "page": 1, "sort": "value", "hide_dust": False, "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
     })
     data = q.data
 
