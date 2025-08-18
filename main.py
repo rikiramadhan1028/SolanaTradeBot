@@ -1714,7 +1714,6 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 denominated_in_sol=denom_sol,
                 slippage_bps=prep["params"]["slippage_bps"],
                 pool="auto",
-                pool="auto",
             )
         else:
             res = await dex_swap(
