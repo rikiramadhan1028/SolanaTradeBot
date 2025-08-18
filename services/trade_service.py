@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional
 # ---- Base URL normalizer ----
 _raw = os.getenv("TRADE_SVC_URL", "http://localhost:8080").strip().rstrip("/")
 if _raw and not _raw.startswith(("http://", "https://")):
-    # default to https kalau user nulis tanpa scheme
     _raw = "https://" + _raw
 TRADE_SVC_URL = _raw
 
@@ -39,6 +38,7 @@ async def _request(
     json: Optional[Dict[str, Any]] = None,
     retries: int = 2,
 ) -> Dict[str, Any]:
+    global _client  # <-- PENTING: deklarasi global sebelum _client dipakai
     url = f"{TRADE_SVC_URL}{path}"
     attempt = 0
     while True:
@@ -47,13 +47,11 @@ async def _request(
             # retry untuk 429/5xx
             if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 attempt += 1
-                # rebuild client (kadang pool stuck pada env tertentu)
                 try:
                     await _client.aclose()
                 except Exception:
                     pass
-                global _client
-                _client = httpx.AsyncClient(
+                _client = httpx.AsyncClient(  # rebuild pool
                     timeout=httpx.Timeout(20.0, connect=5.0, read=15.0),
                     limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
                     headers=DEFAULT_HEADERS,
@@ -99,9 +97,8 @@ async def pumpfun_swap(
     mint: str,
     amount,
     *,
-    # baru:
     denominated_in_sol: Optional[bool] = None,   # True kalau amount SOL; default: buy=True, sell=False
-    slippage_bps: Optional[int] = None,          # kirim bps dari UI; dikonversi ke %
+    slippage_bps: Optional[int] = None,          # dari UI (bps) → dikonversi ke %
     pool: Optional[str] = None,                  # default: env PUMPFUN_POOL
     # kompat lama:
     use_jito: bool = False,
@@ -121,7 +118,6 @@ async def pumpfun_swap(
     if slippage_bps is not None:
         slip_pct = _bps_to_pct(slippage_bps)
     else:
-        # jika user kirim slippage langsung persen (legacy)
         slip_pct = max(0, min(100, int(slippage or 10)))
 
     # SELL dengan angka → kirim "X%" spt dokumen
@@ -132,7 +128,6 @@ async def pumpfun_swap(
     try:
         public_key = await derive_address(private_key)
     except Exception:
-        # biar Node bisa derive sendiri jika perlu
         public_key = ""
 
     payload = {
