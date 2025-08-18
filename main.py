@@ -1653,23 +1653,37 @@ async def _handle_trade_response(
 
 
 # ------------------------- Trade core -------------------------
-async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount, prev_cb_on_end: str):
+async def perform_trade(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    amount,
+    prev_cb_on_end: str | None = None,   # <-- dibuat optional
+):
     message = update.message if update.message else update.callback_query.message
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
+    selected_dex = (context.user_data.get("selected_dex") or "jupiter").lower()
+
+    # fallback tombol back: sesuaikan otomatis bila tidak dikirim dari pemanggil
+    prev_cb = prev_cb_on_end or ("pumpfun_back_to_panel" if selected_dex == "pumpfun" else "back_to_token_panel")
+
     if not wallet or not wallet.get("private_key") or not wallet.get("address"):
-        await reply_err_html(message, "❌ No Solana wallet found. Please create or import one first.", prev_cb=prev_cb_on_end)
+        await reply_err_html(
+            message,
+            "❌ No Solana wallet found. Please create or import one first.",
+            prev_cb=prev_cb,
+        )
         return
 
     # context
     trade_type   = (context.user_data.get("trade_type") or "").lower()      # buy|sell
     amount_type  = (context.user_data.get("amount_type") or "").lower()     # sol|percentage
     token_mint   = context.user_data.get("token_address")
-    dex          = context.user_data.get("selected_dex", "jupiter")         # ✅ perbaiki key
     buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
     sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
+
     if not token_mint:
-        await reply_err_html(message, "❌ No token mint in context.", prev_cb=prev_cb_on_end)
+        await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
         return
 
     # snapshot pra-trade
@@ -1684,35 +1698,38 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         prep = await _prepare_buy_trade(wallet, amount, token_mint, buy_slip_bps)
     else:
         prep = await _prepare_sell_trade(wallet, amount, amount_type, token_mint, sel_slip_bps)
-        # override snapshot SOL khusus sell jika helper memberi pre_sol_ui
-        if isinstance(prep, dict) and "pre_sol_ui" in prep and prep["pre_sol_ui"] is not None:
+        if isinstance(prep, dict) and prep.get("pre_sol_ui") is not None:
             pre_sol_ui = float(prep["pre_sol_ui"])
 
     if prep.get("status") == "error":
-        await reply_err_html(message, prep["message"], prev_cb=prev_cb_on_end)
+        await reply_err_html(message, prep["message"], prev_cb=prev_cb)
         return
 
-    await reply_ok_html(message, f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…", prev_cb=prev_cb_on_end)
-
+    await reply_ok_html(
+        message,
+        f"⏳ Performing {trade_type} on `{token_mint}` via {selected_dex.capitalize()}…",
+        prev_cb=prev_cb,
+    )
 
     # eksekusi
     try:
-        if dex == "pumpfun":
-            # mapping parameter pumpfun
-            
+        if selected_dex == "pumpfun":
+            slip_pct = max(0.0, min(100.0, (prep["params"]["slippage_bps"] / 100.0)))
             if trade_type == "sell" and amount_type == "percentage":
                 amt_param = f"{int(float(amount))}%"
                 denom_sol = False
             else:
                 amt_param = float(amount)
                 denom_sol = True  # buy by SOL
+
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
                 action=trade_type,
                 mint=token_mint,
                 amount=amt_param,
                 denominated_in_sol=denom_sol,
-                slippage_bps=prep["params"]["slippage_bps"],
+                slippage_pct=slip_pct,
+                priority_fee_sol=0.0,
                 pool="auto",
             )
         else:
@@ -1724,12 +1741,17 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
         # handle sukses/gagal + update posisi
         await _handle_trade_response(
-            message, res,
-            trade_type=trade_type, wallet=wallet, user_id=user_id, token_mint=token_mint,
-            pre_sol_ui=pre_sol_ui, pre_token_ui=pre_token_ui, prev_cb=prev_cb_on_end
+            message,
+            res,
+            trade_type=trade_type,
+            wallet=wallet,
+            user_id=user_id,
+            token_mint=token_mint,
+            pre_sol_ui=pre_sol_ui,
+            pre_token_ui=pre_token_ui,
         )
 
-        # fee SELL (pasca-swap) – hanya kalau SELL & fee aktif
+        # fee SELL (pasca-swap)
         if trade_type == "sell" and FEE_ENABLED:
             try:
                 await asyncio.sleep(1.5)
@@ -1741,11 +1763,13 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 print(f"⚠️ Fee check/send failed after sell: {e}")
 
     except Exception as e:
-        await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}", prev_cb=prev_cb_on_end)
-    # The `finally` block with `clear_user_context` was removed to preserve conversation state.
-
-
-
+        await reply_err_html(
+            message,
+            f"❌ An unexpected error occurred: {short_err_text(str(e))}",
+            prev_cb=prev_cb,
+        )
+    finally:
+        clear_user_context(context)
 
 # ----- Slippage set flow -----
 async def handle_set_slippage_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
