@@ -28,7 +28,7 @@ import database
 import wallet_manager
 from blockchain_clients.solana_client import SolanaClient
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -114,7 +114,7 @@ async def reply_err_html(message, text: str, prev_cb: str | None = None):
     await message.reply_html(text, reply_markup=back_markup(prev_cb))
 
 def _is_valid_pubkey(addr: str) -> bool:
-    if not addr or not (32 <= len(addr) <= 44):
+    if not addr or not isinstance(addr, str) or not (32 <= len(addr) <= 44):
         return False
     try:
         import base58
@@ -123,6 +123,10 @@ def _is_valid_pubkey(addr: str) -> bool:
     except Exception:
         return False
 
+class PubkeyFilter(filters.MessageFilter):
+    def filter(self, message: Message) -> bool:
+        return _is_valid_pubkey((message.text or "").strip())
+    
 def format_usd(v: float | str) -> str:
     try:
         f = float(v)
@@ -974,15 +978,15 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
     message = update.message if update.message else update.callback_query.message
     token_address = message.text.strip()
 
-    if len(token_address) < 32 or len(token_address) > 44:
+    if not _is_valid_pubkey(token_address):
         await message.reply_text(
             "❌ Invalid token address format. Please enter a valid Solana token address.",
-            reply_markup=back_markup("back_to_buy_sell_menu"),
+            reply_markup=back_markup("back_to_main_menu"),
         )
         return AWAITING_TOKEN_ADDRESS
 
     context.user_data["token_address"] = token_address
-    context.user_data["selected_dex"] = "jupiter"  # fixed route
+    context.user_data["jupiter"] = "jupiter"  # fixed route
     context.user_data.setdefault("slippage_bps_buy", 500)   # 5%
     context.user_data.setdefault("slippage_bps_sell", 500)  # 5%
 
@@ -1473,6 +1477,10 @@ def main() -> None:
     trade_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(buy_sell, pattern="^buy_sell$"),
+            MessageHandler(
+                (filters.TEXT & ~filters.COMMAND & PubkeyFilter()),
+                handle_token_address_for_trade,
+            ),
         ],
         states={
             AWAITING_TOKEN_ADDRESS: [
