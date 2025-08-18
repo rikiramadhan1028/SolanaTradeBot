@@ -285,7 +285,6 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
     sell_bps = int(context.user_data.get("slippage_bps_sell", 500)) # default 5%
     kb: list[list[InlineKeyboardButton]] = []
     kb.append([
-        InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu"),
         InlineKeyboardButton("Smart Money", callback_data="noop_smart"),
         InlineKeyboardButton("↻ Refresh", callback_data="token_panel_refresh"),
     ])
@@ -314,7 +313,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
         InlineKeyboardButton(f"× {percent_label(sell_bps)} Sell Slippage", callback_data="set_sell_slippage"),
     ])
     kb.append([
-        InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu"),
+        InlineKeyboardButton("⬅️ Change Token", callback_data="back_to_buy_sell_menu"),
         InlineKeyboardButton("🏠 Menu",   callback_data="back_to_main_menu"),
     ])
     return InlineKeyboardMarkup(kb)
@@ -1494,7 +1493,10 @@ def main() -> None:
                 CallbackQueryHandler(handle_back_to_token_panel, pattern="^back_to_token_panel$"),
                 CallbackQueryHandler(handle_refresh_token_panel, pattern="^token_panel_refresh$"),
                 CallbackQueryHandler(handle_set_slippage_entry, pattern="^set_(buy|sell)_slippage$"),
-                CallbackQueryHandler(handle_noop, pattern="^noop_.*$"),
+                MessageHandler(
+                    (filters.TEXT & ~filters.COMMAND & PubkeyFilter()),
+                    handle_token_address_for_trade,
+                ),
                 
             ],
             AWAITING_AMOUNT: [
