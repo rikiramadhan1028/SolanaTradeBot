@@ -1594,6 +1594,7 @@ async def _handle_sell_fee(wallet: dict, pre_sol_ui: float):
         # Log this error but don't bother the user with a fee-related failure message
         print(f"⚠️ Fee check/send failed after sell: {e}")
 
+# ganti/buat versi ini
 async def _handle_trade_response(
     message,
     res: dict,
@@ -1604,15 +1605,15 @@ async def _handle_trade_response(
     token_mint: str,
     pre_sol_ui: float,
     pre_token_ui: float,
-    prev_cb: str,
+    prev_cb: str = "back_to_token_panel",   # <-- default aman
 ):
     if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
+        # ==== update posisi (buy/sell) ====
         try:
-            await asyncio.sleep(2.0)  # tunggu balance update
+            await asyncio.sleep(2.0)
             post_sol_ui   = await svc_get_sol_balance(wallet["address"])
             post_token_ui = await svc_get_token_balance(wallet["address"], token_mint)
 
-            # harga/MC (best effort)
             price_usd = None
             mc_usd    = None
             try:
@@ -1627,17 +1628,25 @@ async def _handle_trade_response(
                 delta_tokens = max(0.0, post_token_ui - pre_token_ui)
                 delta_sol    = max(0.0, pre_sol_ui - post_sol_ui)
                 await _update_position_after_trade(
-                    user_id=user_id, mint=token_mint, side="buy",
-                    delta_tokens=delta_tokens, delta_sol=delta_sol,
-                    price_usd=price_usd, mc_usd=mc_usd,
+                    user_id=user_id,
+                    mint=token_mint,
+                    side="buy",
+                    delta_tokens=delta_tokens,
+                    delta_sol=delta_sol,
+                    price_usd=price_usd,
+                    mc_usd=mc_usd,
                 )
             else:
                 delta_tokens = max(0.0, pre_token_ui - post_token_ui)
                 delta_sol    = max(0.0, post_sol_ui - pre_sol_ui)
                 await _update_position_after_trade(
-                    user_id=user_id, mint=token_mint, side="sell",
-                    delta_tokens=delta_tokens, delta_sol=delta_sol,
-                    price_usd=price_usd, mc_usd=mc_usd,
+                    user_id=user_id,
+                    mint=token_mint,
+                    side="sell",
+                    delta_tokens=delta_tokens,
+                    delta_sol=delta_sol,
+                    price_usd=price_usd,
+                    mc_usd=mc_usd,
                 )
         except Exception as e:
             try:
@@ -1749,6 +1758,7 @@ async def perform_trade(
             token_mint=token_mint,
             pre_sol_ui=pre_sol_ui,
             pre_token_ui=pre_token_ui,
+            prev_cb=prev_cb,
         )
 
         # fee SELL (pasca-swap)
