@@ -39,6 +39,110 @@ from telegram.ext import (
     ConversationHandler,
 )
 
+# === Fast refresh infra (HTTP client + caches) ===
+import time
+from collections import defaultdict
+
+_HTTPX = httpx.AsyncClient(http2=True,
+                           timeout=httpx.Timeout(10.0, connect=3.0, read=8.0),
+                           limits=httpx.Limits(max_connections=50, max_keepalive_connections=25),
+                           headers={"User-Agent": "rokutrade/fast-refresh"})
+
+class MetaCache:
+    """Cache symbol/name per mint (TTL 1 hari)."""
+    TTL = 24 * 3600
+    _store: dict[str, tuple[float, dict]] = {}
+
+    @classmethod
+    async def get(cls, mint: str) -> dict:
+        now = time.time()
+        hit = cls._store.get(mint)
+        if hit and (now - hit[0] < cls.TTL):
+            return hit[1]
+        try:
+            r = await _HTTPX.get(f"{TRADE_SVC_URL}/meta/token/{mint}")
+            data = r.json() if r.status_code == 200 else {}
+        except Exception:
+            data = {}
+        cls._store[mint] = (now, data or {})
+        return data or {}
+
+class DexCache:
+    """
+    Cache harga/LP/MC per mint (TTL 3s) + background warmer.
+    Gunakan get_bulk() saat render; warmer akan menyegarkan berkala supaya
+    Refresh terasa instant.
+    """
+    TTL = 3.0
+    _store: dict[str, tuple[float, dict]] = {}
+    _watch: set[str] = set()
+
+    @classmethod
+    async def _fetch_bulk(cls, mints: list[str]) -> dict[str, dict]:
+        if not mints:
+            return {}
+        # de-dupe & batasi panjang URL (pecah per 50 mint)
+        uniq = list(dict.fromkeys([m for m in mints if m]))
+        out: dict[str, dict] = {}
+        for i in range(0, len(uniq), 50):
+            chunk = uniq[i:i+50]
+            url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk)
+            try:
+                r = await _HTTPX.get(url)
+                data = r.json() if r.status_code == 200 else {}
+                pairs = data.get("pairs") or []
+                # pilih pair dengan LP terbesar per baseToken.address
+                best: dict[str, dict] = {}
+                for p in pairs:
+                    base = (p.get("baseToken") or {}).get("address")
+                    if not base:
+                        continue
+                    lp = float((p.get("liquidity") or {}).get("usd") or 0)
+                    cur_lp = float((best.get(base, {}).get("liquidity") or {}).get("usd") or 0)
+                    if lp >= cur_lp:
+                        best[base] = p
+                for mint, p in best.items():
+                    out[mint] = {
+                        "price": float(p.get("priceUsd") or 0.0) or 0.0,
+                        "lp": float((p.get("liquidity") or {}).get("usd") or 0.0),
+                        "mc": float(p.get("fdv") or p.get("marketCap") or 0.0),
+                    }
+            except Exception:
+                continue
+        now = time.time()
+        for m, pack in out.items():
+            DexCache._store[m] = (now, pack)
+        return out
+
+    @classmethod
+    async def get_bulk(cls, mints: list[str], *, prefer_cache: bool = True) -> dict[str, dict]:
+        """Kembalikan dict mint->pack (price/lp/mc). Ambil cache < TTL, sisanya fetch sekali (batch)."""
+        now = time.time()
+        out: dict[str, dict] = {}
+        missing: list[str] = []
+        for m in mints:
+            cls._watch.add(m)  # daftarkan untuk warmer
+            hit = cls._store.get(m)
+            if prefer_cache and hit and (now - hit[0] < cls.TTL):
+                out[m] = hit[1]
+            else:
+                missing.append(m)
+        if missing:
+            fresh = await cls._fetch_bulk(missing)
+            out.update({m: fresh.get(m, {"price": 0.0, "lp": 0.0, "mc": 0.0}) for m in missing})
+        return out
+
+    @classmethod
+    async def loop(cls, stop_event: asyncio.Event):
+        """Warm cache setiap 2s untuk semua mint yang pernah dirender."""
+        while not stop_event.is_set():
+            try:
+                if cls._watch:
+                    await cls._fetch_bulk(list(cls._watch))
+            except Exception:
+                pass
+            await asyncio.sleep(2.0)
+
 # ============ DEX & Pump.fun via Node microservice ============
 from services.trade_service import (
     dex_swap,
@@ -262,20 +366,27 @@ async def _update_position_after_trade(
     database.position_upsert(pos)
 
 # ---- Realtime SOL/USD price ----
+_SOL_CACHE = {"ts": 0.0, "px": 0.0}
+
 async def get_sol_price_usd() -> float:
-    """Fetch real-time SOL/USD price via Jupiter (fallback Dexscreener)."""
+    now = time.time()
+    if now - _SOL_CACHE["ts"] < 2.0 and _SOL_CACHE["px"] > 0:
+        return _SOL_CACHE["px"]
+    price = 0.0
     try:
         p = await get_token_price(SOLANA_NATIVE_TOKEN_MINT)
         price = float((p or {}).get("price", 0) if isinstance(p, dict) else p or 0)
-        if price > 0:
-            return price
     except Exception:
         pass
-    try:
-        ds = await get_dexscreener_stats(SOLANA_NATIVE_TOKEN_MINT)
-        return float(ds.get("priceUsd") or 0) if ds else 0.0
-    except Exception:
-        return 0.0
+    if price <= 0:
+        try:
+            ds = await DexCache.get_bulk([SOLANA_NATIVE_TOKEN_MINT])
+            price = float(ds.get(SOLANA_NATIVE_TOKEN_MINT, {}).get("price") or 0.0)
+        except Exception:
+            price = 0.0
+    _SOL_CACHE.update({"ts": now, "px": price})
+    return price
+
 
 # ================== Start menu, wallet, etc ==================
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
@@ -396,6 +507,12 @@ async def handle_direct_private_key_import(update: Update, context: ContextTypes
             reply_markup=back_markup("back_to_main_menu"),
         )
 
+    finally:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass # Ignore if message can't be deleted
+ 
 # ================== Token Panel (no DEX selection) ==================
 def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
     buy_bps = int(context.user_data.get("slippage_bps_buy", 500))   # default 5%
@@ -503,14 +620,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # set default state saat pertama buka
-    st = context.user_data.setdefault("assets_state", {
+        q = update.callback_query
+        await q.answer()
+    # init state default agar tidak menyaring dust & tampilkan detail
+        context.user_data.setdefault("assets_state", {
         "page": 1, "sort": "value", "hide_dust": False,
         "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
     })
-    # render detailed
-    await _render_assets_detailed_view(update.callback_query, context)
-
+        await _render_assets_detailed_view(q, context)
 
 
 async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_TYPE):
@@ -558,44 +675,11 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
 
     # === meta & harga (Dexscreener → aggregator fallback) ===
     async def meta_of(mint: str) -> dict:
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as s:
-                r = await s.get(f"{TRADE_SVC_URL}/meta/token/{mint}")
-            if r.status_code == 200:
-                return r.json() or {}
-        except Exception:
-            pass
-        return {}
+        return await MetaCache.get(mint)
 
-    async def price_pack(mint: str) -> dict:
-        # coba Dexscreener dulu biar dapat LP & MC
-        ds = await get_dexscreener_stats(mint)
-        if ds:
-            return {
-                "price": float(ds.get("priceUsd") or 0) or 0.0,
-                "lp": float((ds.get("liquidityUsd") or 0) or 0.0),
-                "mc": float((ds.get("fdvUsd") or 0) or 0.0),
-            }
-        # fallback aggregator
-        px = 0.0; mc = 0.0
-        try:
-            p = await get_token_price(mint)
-            px = float((p or {}).get("price", 0) if isinstance(p, dict) else p or 0)
-            mc = float((p or {}).get("mc", 0)) if isinstance(p, dict) else 0.0
-        except Exception:
-            pass
-        if px <= 0:
-            try:
-                p = await get_token_price_from_raydium(mint); px = float(p.get("price",0) or 0)
-            except Exception: pass
-        if px <= 0:
-            try:
-                p = await get_token_price_from_pumpfun(mint); px = float(p.get("price",0) or 0)
-            except Exception: pass
-        return {"price": px, "lp": 0.0, "mc": mc}
-
+    # harga/LP/MC via batch cache
+    packs_by_mint = await DexCache.get_bulk(mints, prefer_cache=True)
     metas  = await asyncio.gather(*(meta_of(m) for m in mints), return_exceptions=True)
-    packs  = await asyncio.gather(*(price_pack(m) for m in mints), return_exceptions=True)
 
     # optional positions (PNL/cost basis)
     def _pos(mint: str) -> dict:
@@ -610,7 +694,8 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
 
     # gabungkan
     enriched = []
-    for it, meta, pack in zip(items, metas, packs):
+    for it, meta in zip(items, metas):
+        pack = packs_by_mint.get(it["mint"], {"price": 0.0, "lp": 0.0, "mc": 0.0})
         meta = meta if isinstance(meta, dict) else {}
         pack = pack if isinstance(pack, dict) else {"price": 0.0, "lp": 0.0, "mc": 0.0}
         sym  = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or it["mint"][:6].upper()
@@ -1078,6 +1163,11 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
                 "❌ Unexpected error during import. Please check your private key format.",
                 reply_markup=back_markup("back_to_main_menu"),
             )
+        finally:
+            try:
+                await update.message.delete()
+            except Exception:
+                pass # Ignore if message can't be deleted
         return
 
     if command == "send":
@@ -1513,7 +1603,8 @@ async def _handle_trade_response(
     user_id: int,
     token_mint: str,
     pre_sol_ui: float,
-    pre_token_ui: float
+    pre_token_ui: float,
+    prev_cb: str,
 ):
     if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
         try:
@@ -1550,15 +1641,15 @@ async def _handle_trade_response(
                 )
         except Exception as e:
             try:
-                await reply_err_html(message, f"⚠️ Position update failed: {e}", prev_cb="back_to_token_panel")
+                await reply_err_html(message, f"⚠️ Position update failed: {e}", prev_cb=prev_cb)
             except Exception:
                 pass
 
         sig = res.get("signature") or res.get("bundle")
-        await reply_ok_html(message, "✅ Swap successful!", prev_cb="back_to_token_panel", signature=sig)
+        await reply_ok_html(message, "✅ Swap successful!", prev_cb=prev_cb, signature=sig)
     else:
         err = res.get("error") if isinstance(res, dict) else res
-        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
+        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb=prev_cb)
 
 
 # ------------------------- Trade core -------------------------
@@ -1567,8 +1658,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
     if not wallet or not wallet.get("private_key") or not wallet.get("address"):
-        await reply_err_html(message, "❌ No Solana wallet found. Please create or import one first.",
-                            prev_cb="back_to_token_panel")
+        await reply_err_html(message, "❌ No Solana wallet found. Please create or import one first.", prev_cb=prev_cb_on_end)
         return
 
     # context
@@ -1579,7 +1669,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
     buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
     sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
     if not token_mint:
-        await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
+        await reply_err_html(message, "❌ No token mint in context.", prev_cb=prev_cb_on_end)
         return
 
     # snapshot pra-trade
@@ -1599,17 +1689,17 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
             pre_sol_ui = float(prep["pre_sol_ui"])
 
     if prep.get("status") == "error":
-        await reply_err_html(message, prep["message"], prev_cb="back_to_token_panel")
+        await reply_err_html(message, prep["message"], prev_cb=prev_cb_on_end)
         return
 
-    await reply_ok_html(message, f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…",
-                        prev_cb="back_to_token_panel")
+    await reply_ok_html(message, f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…", prev_cb=prev_cb_on_end)
+
 
     # eksekusi
     try:
         if dex == "pumpfun":
             # mapping parameter pumpfun
-            slip_pct = max(0.0, min(100.0, (prep["params"]["slippage_bps"] / 100.0)))
+            
             if trade_type == "sell" and amount_type == "percentage":
                 amt_param = f"{int(float(amount))}%"
                 denom_sol = False
@@ -1622,8 +1712,8 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 mint=token_mint,
                 amount=amt_param,
                 denominated_in_sol=denom_sol,
-                slippage_pct=slip_pct,
-                priority_fee_sol=0.0,
+                slippage_bps=prep["params"]["slippage_bps"],
+                pool="auto",
                 pool="auto",
             )
         else:
@@ -1637,7 +1727,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         await _handle_trade_response(
             message, res,
             trade_type=trade_type, wallet=wallet, user_id=user_id, token_mint=token_mint,
-            pre_sol_ui=pre_sol_ui, pre_token_ui=pre_token_ui
+            pre_sol_ui=pre_sol_ui, pre_token_ui=pre_token_ui, prev_cb=prev_cb_on_end
         )
 
         # fee SELL (pasca-swap) – hanya kalau SELL & fee aktif
@@ -1652,10 +1742,9 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
                 print(f"⚠️ Fee check/send failed after sell: {e}")
 
     except Exception as e:
-        await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}",
-                             prev_cb=prev_cb_on_end)
-    finally:
-        clear_user_context(context)
+        await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}", prev_cb=prev_cb_on_end)
+    # The `finally` block with `clear_user_context` was removed to preserve conversation state.
+
 
 
 
@@ -2009,6 +2098,7 @@ def main() -> None:
 
     async def _on_start(app: Application):
         asyncio.create_task(copytrading_loop(stop_event))
+        asyncio.create_task(DexCache.loop(stop_event))
 
     async def _on_shutdown(app: Application):
         stop_event.set()
