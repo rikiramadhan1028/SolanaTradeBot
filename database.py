@@ -248,3 +248,32 @@ def copy_follow_list_for_leader(leader_address: str) -> list[dict]:
 
 def copy_leaders_active() -> list[dict]:
     return list(copy_leaders.find({"active": True}))
+
+# ===== Positions (per user x token) =====
+# doc shape (contoh field yang kita pakai sekarang):
+# {
+#   user_id, mint,
+#   buy_count, sell_count,
+#   buy_sol, sell_sol, buy_tokens, sell_tokens,
+#   avg_entry_price_usd,            # weighted by tokens
+#   avg_entry_mc_usd,               # optional, weighted by tokens
+#   updated_at
+# }
+positions_collection = db["positions"]
+positions_collection.create_index([("user_id", ASCENDING), ("mint", ASCENDING)], unique=True)
+
+def position_get(user_id: int, mint: str):
+    return positions_collection.find_one({"user_id": int(user_id), "mint": mint})
+
+def position_upsert(doc: dict):
+    doc = dict(doc)
+    doc["user_id"] = int(doc["user_id"])
+    doc["updated_at"] = int(time.time())
+    positions_collection.update_one(
+        {"user_id": doc["user_id"], "mint": doc["mint"]},
+        {"$set": doc},
+        upsert=True,
+    )
+
+def position_list(user_id: int):
+    return list(positions_collection.find({"user_id": int(user_id)}))

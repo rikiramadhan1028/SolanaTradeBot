@@ -195,6 +195,63 @@ async def get_dexscreener_stats(mint: str) -> dict:
     except Exception:
         return {}
 
+async def _update_position_after_trade(
+    *,
+    user_id: int,
+    mint: str,
+    side: str,                   # "buy" | "sell"
+    delta_tokens: float,         # +tokens saat buy, +tokens_sold saat sell
+    delta_sol: float,            # SOL spent saat buy (positif), SOL received saat sell (positif)
+    price_usd: float | None = None,
+    mc_usd: float | None = None
+):
+    """Accumulate counters + weighted averages."""
+    side = side.lower()
+    if delta_tokens <= 0 and delta_sol <= 0:
+        return
+
+    pos = database.position_get(user_id, mint) or {
+        "user_id": user_id,
+        "mint": mint,
+        "buy_count": 0,
+        "sell_count": 0,
+        "buy_sol": 0.0,
+        "sell_sol": 0.0,
+        "buy_tokens": 0.0,
+        "sell_tokens": 0.0,
+        "avg_entry_price_usd": None,
+        "avg_entry_mc_usd": None,
+    }
+
+    if side == "buy":
+        pos["buy_count"] = int(pos.get("buy_count", 0)) + 1
+        pos["buy_sol"]   = float(pos.get("buy_sol", 0.0)) + float(delta_sol)
+        old_tok          = float(pos.get("buy_tokens", 0.0))
+        new_tok          = max(0.0, float(delta_tokens))
+        pos["buy_tokens"] = old_tok + new_tok
+
+        # Weighted avg by tokens
+        if price_usd and new_tok > 0:
+            old_avg = pos.get("avg_entry_price_usd")
+            if isinstance(old_avg, (int, float)) and old_tok > 0:
+                pos["avg_entry_price_usd"] = (old_avg * old_tok + float(price_usd) * new_tok) / (old_tok + new_tok)
+            else:
+                pos["avg_entry_price_usd"] = float(price_usd)
+
+        if mc_usd and new_tok > 0:
+            old_mc = pos.get("avg_entry_mc_usd")
+            if isinstance(old_mc, (int, float)) and old_tok > 0:
+                pos["avg_entry_mc_usd"] = (old_mc * old_tok + float(mc_usd) * new_tok) / (old_tok + new_tok)
+            else:
+                pos["avg_entry_mc_usd"] = float(mc_usd)
+
+    else:  # sell
+        pos["sell_count"]  = int(pos.get("sell_count", 0)) + 1
+        pos["sell_sol"]    = float(pos.get("sell_sol", 0.0)) + float(delta_sol)
+        pos["sell_tokens"] = float(pos.get("sell_tokens", 0.0)) + max(0.0, float(delta_tokens))
+
+    database.position_upsert(pos)
+
 # ---- Realtime SOL/USD price ----
 async def get_sol_price_usd() -> float:
     """Fetch real-time SOL/USD price via Jupiter (fallback Dexscreener)."""
@@ -404,20 +461,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Entry Assets – set default state dan render halaman 1 (Detailed)."""
-    clear_user_context(context)
-    q = update.callback_query
-    await q.answer()
+    # set default state saat pertama buka
+    st = context.user_data.setdefault("assets_state", {
+        "page": 1, "sort": "value", "hide_dust": True,
+        "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
+    })
+    # render detailed
+    await _render_assets_detailed_view(update.callback_query, context)
 
-    st = context.user_data.setdefault("assets_state", {})
-    st.setdefault("page", 1)
-    st.setdefault("sort", "value")        # 'value' | 'alpha' | 'pct'
-    st.setdefault("hide_dust", True)
-    st.setdefault("dust_usd", DEFAULT_DUST_USD)
-    st.setdefault("detail", True)         # detailed cards on
-    st.setdefault("hidden_mints", set())  # per-session hidden
 
-    await _render_assets_detailed_view(q, context)
 
 async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_TYPE):
     """Render SPL tokens sebagai kartu detail ala screenshot."""
@@ -623,7 +675,7 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     ]
     row1 = [
         InlineKeyboardButton(f"{sort_label}", callback_data=f"assets_sort_{sort_next}"),
-        InlineKeyboardButton(("Show All" if hide_dust else "Hide Dust"), callback_data="assets_toggle_dust"),
+       
     ]
     row2 = [b for b in (prev_btn, InlineKeyboardButton("↻ Refresh", callback_data="assets_refresh"), next_btn) if b]
     # baris tombol contextual per kartu tidak bisa inline per baris di teks HTML,
@@ -1317,20 +1369,17 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
     if not FEE_ENABLED:
         return None
     fee_ui = _fee_ui(ui_amount)
-    if fee_ui <= 0.00001:  # minimum to avoid dust/gas wasting
+    if fee_ui <= 0.00001:
         return None
-        
     print(f"Attempting to send {fee_ui:.6f} SOL fee ({reason}) to {FEE_WALLET}")
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
-    
     if isinstance(tx, str) and not tx.lower().startswith("error"):
-        # Message to user has been removed, we only print to log
         print(f"✅ Platform fee successful. Signature: {tx}")
         return tx
     else:
-        # Error message to user has also been removed
         print(f"⚠️ Platform fee transfer failed: {tx}")
         return None
+
 
 async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int) -> dict:
     """Prepares parameters for a buy trade, checking balance and handling pre-swap fees."""
@@ -1413,98 +1462,159 @@ async def _handle_sell_fee(wallet: dict, pre_sol_ui: float):
         # Log this error but don't bother the user with a fee-related failure message
         print(f"⚠️ Fee check/send failed after sell: {e}")
 
-async def _handle_trade_response(message, res: dict, trade_type: str, wallet: dict, pre_sol_ui: float):
-    """Handles the response from the trade service, sending success/error messages and handling post-sell fees."""
+async def _handle_trade_response(
+    message,
+    res: dict,
+    *,
+    trade_type: str,
+    wallet: dict,
+    user_id: int,
+    token_mint: str,
+    pre_sol_ui: float,
+    pre_token_ui: float
+):
     if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
+        try:
+            await asyncio.sleep(2.0)  # tunggu balance update
+            post_sol_ui   = await svc_get_sol_balance(wallet["address"])
+            post_token_ui = await svc_get_token_balance(wallet["address"], token_mint)
+
+            # harga/MC (best effort)
+            price_usd = None
+            mc_usd    = None
+            try:
+                ds = await get_dexscreener_stats(token_mint)
+                if ds:
+                    price_usd = float(ds.get("priceUsd") or 0) or None
+                    mc_usd    = float(ds.get("fdvUsd") or 0) or None
+            except Exception:
+                pass
+
+            if trade_type == "buy":
+                delta_tokens = max(0.0, post_token_ui - pre_token_ui)
+                delta_sol    = max(0.0, pre_sol_ui - post_sol_ui)
+                await _update_position_after_trade(
+                    user_id=user_id, mint=token_mint, side="buy",
+                    delta_tokens=delta_tokens, delta_sol=delta_sol,
+                    price_usd=price_usd, mc_usd=mc_usd,
+                )
+            else:
+                delta_tokens = max(0.0, pre_token_ui - post_token_ui)
+                delta_sol    = max(0.0, post_sol_ui - pre_sol_ui)
+                await _update_position_after_trade(
+                    user_id=user_id, mint=token_mint, side="sell",
+                    delta_tokens=delta_tokens, delta_sol=delta_sol,
+                    price_usd=price_usd, mc_usd=mc_usd,
+                )
+        except Exception as e:
+            try:
+                await reply_err_html(message, f"⚠️ Position update failed: {e}", prev_cb="back_to_token_panel")
+            except Exception:
+                pass
+
         sig = res.get("signature") or res.get("bundle")
-        await reply_ok_html(
-            message,
-            "✅ Swap successful!",
-            prev_cb="back_to_token_panel",
-            signature=sig,
-        )
-        if trade_type == "sell":
-            await _handle_sell_fee(wallet, pre_sol_ui)
+        await reply_ok_html(message, "✅ Swap successful!", prev_cb="back_to_token_panel", signature=sig)
     else:
         err = res.get("error") if isinstance(res, dict) else res
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
 
+
 # ------------------------- Trade core -------------------------
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
-    """
-        Orchestrates a trade by preparing parameters, executing the swap, and handling the response.
-    - BUY: SOL -> token (fee is taken from the input SOL before the swap)
-    - SELL: token -> SOL (fee is taken from the resulting SOL after the swap)
-    """
     message = update.message if update.message else update.callback_query.message
-
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
     if not wallet or not wallet.get("private_key") or not wallet.get("address"):
-        await reply_err_html(
-            message,
-            "❌ No Solana wallet found. Please create or import one first.",
-            prev_cb="back_to_token_panel",
-        )
+        await reply_err_html(message, "❌ No Solana wallet found. Please create or import one first.",
+                            prev_cb="back_to_token_panel")
         return
 
-    
+    # context
+    trade_type   = (context.user_data.get("trade_type") or "").lower()      # buy|sell
+    amount_type  = (context.user_data.get("amount_type") or "").lower()     # sol|percentage
+    token_mint   = context.user_data.get("token_address")
+    dex          = context.user_data.get("selected_dex", "jupiter")         # ✅ perbaiki key
+    buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
+    sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
+    if not token_mint:
+        await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
+        return
 
-    # ===================== Call trade-svc =====================
+    # snapshot pra-trade
     try:
-        trade_type = (context.user_data.get("trade_type") or "").lower()
-        amount_type = (context.user_data.get("amount_type") or "").lower()
-        token_mint = context.user_data.get("token_address")
-        dex = context.user_data.get("pumpfun", "jupiter")
-        buy_slip_bps = int(context.user_data.get("slippage_bps_buy", 500))
-        sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
-        pre_sol_ui = None
+        pre_sol_ui   = await svc_get_sol_balance(wallet["address"])
+        pre_token_ui = await svc_get_token_balance(wallet["address"], token_mint)
+    except Exception:
+        pre_sol_ui, pre_token_ui = 0.0, 0.0
 
-        if not token_mint:
-            await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
-            return
+    # siapkan parameter
+    if trade_type == "buy":
+        prep = await _prepare_buy_trade(wallet, amount, token_mint, buy_slip_bps)
+    else:
+        prep = await _prepare_sell_trade(wallet, amount, amount_type, token_mint, sel_slip_bps)
+        # override snapshot SOL khusus sell jika helper memberi pre_sol_ui
+        if isinstance(prep, dict) and "pre_sol_ui" in prep and prep["pre_sol_ui"] is not None:
+            pre_sol_ui = float(prep["pre_sol_ui"])
 
-        if trade_type == "buy":
-            prep_result = await _prepare_buy_trade(wallet, amount, token_mint, buy_slip_bps)
-        else:  # sell
-            prep_result = await _prepare_sell_trade(wallet, amount, amount_type, token_mint, sel_slip_bps)
-            pre_sol_ui = prep_result.get("pre_sol_ui")
+    if prep.get("status") == "error":
+        await reply_err_html(message, prep["message"], prev_cb="back_to_token_panel")
+        return
 
-        if prep_result["status"] == "error":
-            await reply_err_html(message, prep_result["message"], prev_cb="back_to_token_panel")
-            return
+    await reply_ok_html(message, f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…",
+                        prev_cb="back_to_token_panel")
 
-        swap_params = prep_result["params"]
-
-        await reply_ok_html(
-            message,
-            f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…",
-            prev_cb="back_to_token_panel",
-        )
-
+    # eksekusi
+    try:
         if dex == "pumpfun":
+            # mapping parameter pumpfun
+            slip_pct = max(0.0, min(100.0, (prep["params"]["slippage_bps"] / 100.0)))
+            if trade_type == "sell" and amount_type == "percentage":
+                amt_param = f"{int(float(amount))}%"
+                denom_sol = False
+            else:
+                amt_param = float(amount)
+                denom_sol = True  # buy by SOL
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
-                action=trade_type, # 'buy' or 'sell'
+                action=trade_type,
                 mint=token_mint,
-                amount=amount,  # Pumpfun service expects original UI amount
-                slippage_bps=swap_params["slippage_bps"],
-                use_jito=False,
+                amount=amt_param,
+                denominated_in_sol=denom_sol,
+                slippage_pct=slip_pct,
+                priority_fee_sol=0.0,
+                pool="auto",
             )
-        else: # Default to Jupiter
+        else:
             res = await dex_swap(
                 private_key=wallet["private_key"],
-                **swap_params,
+                **prep["params"],
                 priority_fee_sol=0.0,
             )
 
-            await _handle_trade_response(message, res, trade_type, wallet, pre_sol_ui)
+        # handle sukses/gagal + update posisi
+        await _handle_trade_response(
+            message, res,
+            trade_type=trade_type, wallet=wallet, user_id=user_id, token_mint=token_mint,
+            pre_sol_ui=pre_sol_ui, pre_token_ui=pre_token_ui
+        )
+
+        # fee SELL (pasca-swap) – hanya kalau SELL & fee aktif
+        if trade_type == "sell" and FEE_ENABLED:
+            try:
+                await asyncio.sleep(1.5)
+                post_sol_ui = await svc_get_sol_balance(wallet["address"])
+                delta_ui = max(0.0, post_sol_ui - pre_sol_ui)
+                if delta_ui > 0:
+                    await _send_fee_sol_if_any(wallet["private_key"], delta_ui, "SELL")
+            except Exception as e:
+                print(f"⚠️ Fee check/send failed after sell: {e}")
 
     except Exception as e:
-        await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}", prev_cb="back_to_token_panel")
+        await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}",
+                             prev_cb="back_to_token_panel")
     finally:
         clear_user_context(context)
-        
+
 
 
 # ----- Slippage set flow -----
