@@ -985,7 +985,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
         return AWAITING_TOKEN_ADDRESS
 
     context.user_data["token_address"] = token_address
-    context.user_data["jupiter"] = "jupiter"  # fixed route
+    context.user_data["selected_dex"] = "jupiter"  # fixed route
     context.user_data.setdefault("slippage_bps_buy", 500)   # 5%
     context.user_data.setdefault("slippage_bps_sell", 500)  # 5%
 
@@ -1210,7 +1210,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         trade_type = (context.user_data.get("trade_type") or "").lower()
         amount_type = (context.user_data.get("amount_type") or "").lower()
         token_mint = context.user_data.get("token_address")
-        dex = context.user_data.get("selected_dex", "jupiter")
+        dex = context.user_data.get("pumpfun", "jupiter")
         buy_slip_bps = int(context.user_data.get("slippage_bps_buy", 500))
         sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
         pre_sol_ui = None
