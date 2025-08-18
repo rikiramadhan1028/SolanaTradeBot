@@ -1065,7 +1065,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 def _fee_ui(val_ui: float) -> float:
     return max(0.0, float(val_ui) * (FEE_BPS / 10_000.0))
 
-async def _send_fee_sol_if_any(private_key: str, ui_amount: float, message, reason: str):
+async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
     if not FEE_ENABLED:
         return None
     fee_ui = _fee_ui(ui_amount)
@@ -1084,12 +1084,109 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, message, reas
         print(f"⚠️ Platform fee transfer failed: {tx}")
         return None
 
+async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int) -> dict:
+    """Prepares parameters for a buy trade, checking balance and handling pre-swap fees."""
+    total_sol_to_spend = float(amount)
+    fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
+    actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
+
+    try:
+        sol_balance = await svc_get_sol_balance(wallet["address"])
+    except Exception:
+        sol_balance = 0.0
+
+    buffer_ui = 0.002  # Gas fees buffer
+    if sol_balance < total_sol_to_spend + buffer_ui:
+        return {
+            "status": "error",
+            "message": f"❌ Not enough SOL. Need ~{(total_sol_to_spend + buffer_ui):.4f} SOL (amount + fees), you have {sol_balance:.4f} SOL.",
+        }
+
+    # Send fee now, before the swap
+    if FEE_ENABLED and fee_amount_ui > 0:
+        await _send_fee_sol_if_any(wallet["private_key"], total_sol_to_spend, "BUY")
+
+    return {
+        "status": "ok",
+        "params": {
+            "input_mint": SOLANA_NATIVE_TOKEN_MINT,
+            "output_mint": token_mint,
+            "amount_lamports": int(actual_swap_amount_ui * 1_000_000_000),
+            "slippage_bps": slippage_bps,
+        },
+    }
+
+async def _prepare_sell_trade(wallet: dict, amount: float, amount_type: str, token_mint: str, slippage_bps: int) -> dict:
+    """Prepares parameters for a sell trade, checking balance and getting pre-swap SOL balance for fees."""
+    try:
+        decimals = int(await svc_get_mint_decimals(token_mint))
+        token_balance_ui = float(await svc_get_token_balance(wallet["address"], token_mint))
+    except Exception:
+        return {"status": "error", "message": "❌ Could not fetch token balance or decimals."}
+
+    if amount_type == "percentage":
+        if token_balance_ui <= 0:
+            return {"status": "error", "message": f"❌ Insufficient balance for token `{token_mint}`."}
+        sell_ui = token_balance_ui * (float(amount) / 100.0)
+    else:  # Custom token amount
+        sell_ui = float(amount)
+        if sell_ui > token_balance_ui + 1e-12:
+            return {"status": "error", "message": "❌ Amount exceeds wallet balance."}
+
+    pre_sol_ui = 0.0
+    if FEE_ENABLED:
+        try:
+            pre_sol_ui = await svc_get_sol_balance(wallet["address"])
+        except Exception:
+            pass # Not critical if this fails
+
+    return {
+        "status": "ok",
+        "params": {
+            "input_mint": token_mint,
+            "output_mint": SOLANA_NATIVE_TOKEN_MINT,
+            "amount_lamports": int(sell_ui * (10 ** decimals)),
+            "slippage_bps": slippage_bps,
+        },
+        "pre_sol_ui": pre_sol_ui,
+    }
+
+async def _handle_sell_fee(wallet: dict, pre_sol_ui: float):
+    """After a successful sell, calculates the SOL gain and sends the fee."""
+    if not FEE_ENABLED or pre_sol_ui is None:
+        return
+    try:
+        await asyncio.sleep(1.5) # Wait for balance to update
+        post_sol_ui = await svc_get_sol_balance(wallet["address"])
+        delta_ui = max(0.0, post_sol_ui - pre_sol_ui)
+        if delta_ui > 0:
+            await _send_fee_sol_if_any(wallet["private_key"], delta_ui, "SELL")
+    except Exception as e:
+        # Log this error but don't bother the user with a fee-related failure message
+        print(f"⚠️ Fee check/send failed after sell: {e}")
+
+async def _handle_trade_response(message, res: dict, trade_type: str, wallet: dict, pre_sol_ui: float):
+    """Handles the response from the trade service, sending success/error messages and handling post-sell fees."""
+    if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
+        sig = res.get("signature") or res.get("bundle")
+        await reply_ok_html(
+            message,
+            "✅ Swap successful!",
+            prev_cb="back_to_token_panel",
+            signature=sig,
+        )
+        if trade_type == "sell":
+            await _handle_sell_fee(wallet, pre_sol_ui)
+    else:
+        err = res.get("error") if isinstance(res, dict) else res
+        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
+
 # ------------------------- Trade core -------------------------
 async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
     """
-    - BUY  : SOL -> token (fee is taken from the input SOL before the swap)
-    - SELL : token -> SOL (fee is taken from the resulting SOL after the swap)
-    - Balances/decimals via trade-svc (web3.js) for accuracy.
+        Orchestrates a trade by preparing parameters, executing the swap, and handling the response.
+    - BUY: SOL -> token (fee is taken from the input SOL before the swap)
+    - SELL: token -> SOL (fee is taken from the resulting SOL after the swap)
     """
     message = update.message if update.message else update.callback_query.message
 
@@ -1103,161 +1200,63 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
         )
         return
 
-    trade_type   = (context.user_data.get("trade_type") or "").lower()      # "buy" | "sell"
-    amount_type  = (context.user_data.get("amount_type") or "").lower()     # "sol" | "percentage"
-    token_mint   = context.user_data.get("token_address")                   # mint string
-    dex          = context.user_data.get("selected_dex", "jupiter")
-    buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
-    sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
-
-    if not token_mint:
-        await reply_err_html(
-            message,
-            "❌ No token mint in context. Please go back and send a token address again.",
-            prev_cb="back_to_buy_sell_menu",
-        )
-        return
-
-    SOL_MINT = SOLANA_NATIVE_TOKEN_MINT
-
-    # ===================== BUY =====================
-    if trade_type == "buy":
-        input_mint = SOLANA_NATIVE_TOKEN_MINT
-        output_mint = token_mint
-        slippage_bps = buy_slip_bps
-
-        # Total SOL amount entered by the user
-        total_sol_to_spend = float(amount)
-        
-        # Calculate fee first
-        fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
-        
-        # The actual SOL amount for the swap is the total minus the fee
-        actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
-
-        # Check balance before sending the fee
-        try:
-            sol_balance = await svc_get_sol_balance(wallet["address"])
-        except Exception:
-            sol_balance = 0.0
-
-        buffer_ui = 0.002 # For gas fees
-        if sol_balance < total_sol_to_spend + buffer_ui:
-            await reply_err_html(
-                message,
-                f"❌ Not enough SOL. Need ~{(total_sol_to_spend + buffer_ui):.4f} SOL (amount + fees), you have {sol_balance:.4f} SOL.",
-                prev_cb="back_to_token_panel",
-            )
-            return
-
-        # Send fee if applicable
-        if FEE_ENABLED and fee_amount_ui > 0:
-            await _send_fee_sol_if_any(wallet["private_key"], total_sol_to_spend, message, "BUY")
-
-        # Amount to swap in lamports
-        amount_lamports = int(actual_swap_amount_ui * 1_000_000_000)
-
-    # ===================== SELL =====================
-    else: # trade_type == "sell"
-        input_mint = token_mint
-        output_mint = SOLANA_NATIVE_TOKEN_MINT
-        slippage_bps = sel_slip_bps
     
-        try:
-            decimals = int(await svc_get_mint_decimals(token_mint))
-        except Exception:
-            decimals = 6
-    
-        try:
-            token_balance_ui = float(await svc_get_token_balance(wallet["address"], token_mint))
-        except Exception:
-            token_balance_ui = 0.0
-
-        if amount_type == "percentage":
-            if token_balance_ui <= 0:
-                await reply_err_html(
-                    message,
-                    f"❌ Insufficient balance for token `{token_mint}`.",
-                    prev_cb="back_to_token_panel",
-                )
-                return
-            sell_ui = token_balance_ui * (float(amount) / 100.0)
-        else: # amount_type is 'sol' for Pump.fun, but not used for sell. this is for custom amount in tokens.
-            sell_ui = float(amount)
-            if sell_ui > token_balance_ui + 1e-12:
-                await reply_err_html(
-                    message,
-                    "❌ Amount exceeds wallet balance.",
-                    prev_cb="back_to_token_panel",
-                )
-                return
-    
-        amount_lamports = int(sell_ui * (10 ** decimals))
-    
-        pre_sol_ui = 0.0
-        if FEE_ENABLED:
-            try:
-                pre_sol_ui = await svc_get_sol_balance(wallet["address"])
-            except Exception:
-                pre_sol_ui = 0.0
-
-    # Feedback to the user during execution
-    await reply_ok_html(
-        message,
-        f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…",
-        prev_cb="back_to_token_panel",
-    )
 
     # ===================== Call trade-svc =====================
     try:
+        trade_type = (context.user_data.get("trade_type") or "").lower()
+        amount_type = (context.user_data.get("amount_type") or "").lower()
+        token_mint = context.user_data.get("token_address")
+        dex = context.user_data.get("selected_dex", "jupiter")
+        buy_slip_bps = int(context.user_data.get("slippage_bps_buy", 500))
+        sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
+        pre_sol_ui = None
+
+        if not token_mint:
+            await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
+            return
+
+        if trade_type == "buy":
+            prep_result = await _prepare_buy_trade(wallet, amount, token_mint, buy_slip_bps)
+        else:  # sell
+            prep_result = await _prepare_sell_trade(wallet, amount, amount_type, token_mint, sel_slip_bps)
+            pre_sol_ui = prep_result.get("pre_sol_ui")
+
+        if prep_result["status"] == "error":
+            await reply_err_html(message, prep_result["message"], prev_cb="back_to_token_panel")
+            return
+
+        swap_params = prep_result["params"]
+
+        await reply_ok_html(
+            message,
+            f"⏳ Performing {trade_type} on `{token_mint}` via {dex.capitalize()}…",
+            prev_cb="back_to_token_panel",
+        )
+
         if dex == "pumpfun":
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
                 action=trade_type, # 'buy' or 'sell'
                 mint=token_mint,
-                amount=amount,  # SOL amount for buy, percentage for sell
-                slippage_bps=slippage_bps,
+                amount=amount,  # Pumpfun service expects original UI amount
+                slippage_bps=swap_params["slippage_bps"],
                 use_jito=False,
             )
         else: # Default to Jupiter
             res = await dex_swap(
                 private_key=wallet["private_key"],
-                input_mint=input_mint,
-                output_mint=output_mint,
-                amount_lamports=amount_lamports,
-                dex=dex,
-                slippage_bps=slippage_bps,
+                **swap_params,
                 priority_fee_sol=0.0,
             )
+
+            await _handle_trade_response(message, res, trade_type, wallet, pre_sol_ui)
+
     except Exception as e:
-        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(e))}", prev_cb="back_to_token_panel")
+        await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}", prev_cb="back_to_token_panel")
+    finally:
         clear_user_context(context)
-        # Do not return ConversationHandler.END here to avoid errors when called outside a conversation
-        return
-
-    if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
-        sig = res.get("signature") or res.get("bundle")
-        await reply_ok_html(
-            message,
-            "✅ Swap successful!",
-            prev_cb="back_to_token_panel",
-            signature=sig,
-        )
-        # SELL fee post-swap
-        if trade_type != "buy" and FEE_ENABLED:
-            try:
-                await asyncio.sleep(1.5)
-                post_sol_ui = await svc_get_sol_balance(wallet["address"])
-                delta_ui = max(0.0, post_sol_ui - pre_sol_ui)
-                if delta_ui > 0:
-                    await _send_fee_sol_if_any(wallet["private_key"], delta_ui, message, "SELL")
-            except Exception as e:
-                await reply_err_html(message, f"⚠️ Fee check failed: {e}", prev_cb="back_to_token_panel")
-    else:
-        err = res.get("error") if isinstance(res, dict) else res
-        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb="back_to_token_panel")
-
-    clear_user_context(context)
+        
 
 
 # ----- Slippage set flow -----
