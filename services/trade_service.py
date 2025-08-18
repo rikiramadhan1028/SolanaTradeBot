@@ -70,11 +70,11 @@ async def _request(
                 "status": r.status_code,
             }
         except httpx.ConnectError as e:
-            return {"error": f"connect_error to {url}: {e}"}
+            return {"error": f"connect_error to server: {e}"}
         except httpx.ReadTimeout:
-            return {"error": f"timeout calling {url}"}
+            return {"error": f"timeout calling server"}
         except Exception as e:
-            return {"error": f"unexpected error calling {url}: {e}"}
+            return {"error": f"unexpected error calling server: {e}"}
 
 # ---- Public helpers ----
 

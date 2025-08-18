@@ -122,6 +122,15 @@ def _is_valid_pubkey(addr: str) -> bool:
         return True
     except Exception:
         return False
+    
+class PrivateKeyFilter(filters.MessageFilter):
+
+    def filter(self, message: Message) -> bool:
+        try:
+            wallet_manager.validate_and_clean_private_key(message.text or "")
+            return True
+        except ValueError:
+            return False
 
 class PubkeyFilter(filters.MessageFilter):
     def filter(self, message: Message) -> bool:
@@ -353,6 +362,39 @@ def validate_and_clean_private_key(key_data: str) -> str:
                 return base58.b58encode(key_bytes).decode()
             except Exception:
                 raise ValueError(f"Invalid private key format. Not valid Base58 or Hex: {decode_error}")
+
+async def handle_direct_private_key_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles direct paste of private key without 'import' command."""
+    user_id = update.effective_user.id
+    key_data = update.message.text.strip()
+
+    try:
+        cleaned_key = wallet_manager.validate_and_clean_private_key(key_data)
+
+        old_wallet = database.get_user_wallet(user_id)
+        already_exists = old_wallet.get("address") is not None
+
+        pubkey = wallet_manager.get_solana_pubkey_from_private_key_json(cleaned_key)
+        database.set_user_wallet(user_id, cleaned_key, str(pubkey))
+
+        msg = f"✅ Solana wallet {'replaced' if already_exists else 'imported'}!\nAddress: `{pubkey}`"
+        if already_exists:
+            msg += "\n⚠️ Previous Solana wallet was overwritten."
+        await update.message.reply_text(
+            msg, parse_mode="Markdown", reply_markup=back_markup("back_to_main_menu")
+        )
+
+    except ValueError as e:
+        await update.message.reply_text(
+            f"❌ Error importing Solana wallet: {e}",
+            reply_markup=back_markup("back_to_main_menu"),
+        )
+    except Exception as e:
+        print(f"Direct import error: {e}")
+        await update.message.reply_text(
+            "❌ Unexpected error during import. Please check your private key format.",
+            reply_markup=back_markup("back_to_main_menu"),
+        )
 
 # ================== Token Panel (no DEX selection) ==================
 def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
@@ -1520,7 +1562,7 @@ async def _handle_trade_response(
 
 
 # ------------------------- Trade core -------------------------
-async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
+async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amount, prev_cb_on_end: str):
     message = update.message if update.message else update.callback_query.message
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
@@ -1611,7 +1653,7 @@ async def perform_trade(update: Update, context: ContextTypes.DEFAULT_TYPE, amou
 
     except Exception as e:
         await reply_err_html(message, f"❌ An unexpected error occurred: {short_err_text(str(e))}",
-                             prev_cb="back_to_token_panel")
+                             prev_cb=prev_cb_on_end)
     finally:
         clear_user_context(context)
 
@@ -1942,6 +1984,12 @@ def main() -> None:
 
     # --- TEXT handlers (ORDER MATTERS!) ---
     # 1) First, catch copy* commands (case-insensitive)
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT & ~filters.COMMAND & PrivateKeyFilter()),
+            handle_direct_private_key_import,
+        ),
+    )
     application.add_handler(
         MessageHandler(
             filters.Regex(r"(?i)^(copyadd|copyon|copyoff|copyrm)\b"),
