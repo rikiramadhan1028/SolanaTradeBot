@@ -2084,7 +2084,6 @@ def main() -> None:
 
     # --- Command & other conversations ---
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_assets_callbacks))
     application.add_handler(trade_conv_handler)
     application.add_handler(pumpfun_conv_handler)
 
