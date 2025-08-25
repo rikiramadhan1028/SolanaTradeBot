@@ -12,11 +12,10 @@ from copy_trading import copytrading_loop
 # -------- env must be loaded BEFORE os.getenv is called --------
 from dotenv import load_dotenv
 load_dotenv()
-
 # -------- ENV --------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TRADE_SVC_URL      = os.getenv("TRADE_SVC_URL", "http://localhost:8080").rstrip("/")
-
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://yourdomain.com/webhook")
 # Optional platform fee (default OFF)
 # FEE_BPS: basis points, 100 = 1%
 FEE_BPS     = int(os.getenv("FEE_BPS", "0"))
@@ -2085,6 +2084,7 @@ def main() -> None:
 
     # --- Command & other conversations ---
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_assets_callbacks))
     application.add_handler(trade_conv_handler)
     application.add_handler(pumpfun_conv_handler)
 
@@ -2136,11 +2136,21 @@ def main() -> None:
     async def _on_shutdown(app: Application):
         stop_event.set()
 
+    async def set_webhook_and_run():
+        asyncio.run(set_webhook_and_run())
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=8443,
+            webhook_url="https://yourdomain.com/webhook"
+        )
+
     application.post_init = _on_start
     application.post_shutdown = _on_shutdown
 
     print("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
+     
 if __name__ == "__main__":
     main()
+        
