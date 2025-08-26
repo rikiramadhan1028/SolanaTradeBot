@@ -3,10 +3,13 @@ import json
 import base64
 import base58
 import httpx
+import asyncio
+import logging
 from typing import Any, Dict, Optional
 
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts, TokenAccountOpts
+from .websocket_manager import SolanaWebSocketManager
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -39,6 +42,61 @@ JITO_BUNDLE_ENDPOINT = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 class SolanaClient:
     def __init__(self, rpc_url: str):
         self.client = Client(rpc_url)
+        self.rpc_url = rpc_url
+        self.ws_url = self._get_ws_url(rpc_url)
+        self.ws_manager = None
+        self.logger = logging.getLogger(__name__)
+    
+    def _get_ws_url(self, rpc_url: str) -> str:
+        """Convert HTTP RPC URL to WebSocket URL"""
+        if rpc_url.startswith("https://"):
+            return rpc_url.replace("https://", "wss://")
+        elif rpc_url.startswith("http://"):
+            return rpc_url.replace("http://", "ws://")
+        return rpc_url
+    
+    async def _ensure_ws_connection(self) -> bool:
+        """Ensure WebSocket connection is available"""
+        if not self.ws_manager:
+            self.ws_manager = SolanaWebSocketManager(self.ws_url)
+        return await self.ws_manager.connect()
+    
+    async def _confirm_transaction_ws(self, signature: str, commitment: str = "confirmed", timeout: float = 60.0) -> bool:
+        """Confirm transaction using WebSocket with fallback to polling"""
+        try:
+            if not await self._ensure_ws_connection():
+                self.logger.warning("WebSocket unavailable, falling back to polling confirmation")
+                return self._confirm_transaction_polling(signature, commitment)
+            
+            result = await self.ws_manager.wait_for_signature_confirmation(
+                signature, timeout=timeout, commitment=commitment
+            )
+            
+            if "error" in result:
+                self.logger.warning(f"WebSocket confirmation failed: {result['error']}, falling back to polling")
+                return self._confirm_transaction_polling(signature, commitment)
+            
+            # Check if transaction was successful
+            if result and result.get("value") and result["value"].get("err") is None:
+                self.logger.info(f"Transaction {signature[:8]}... confirmed via WebSocket")
+                return True
+            else:
+                self.logger.error(f"Transaction {signature[:8]}... failed: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"WebSocket confirmation error: {e}, falling back to polling")
+            return self._confirm_transaction_polling(signature, commitment)
+    
+    def _confirm_transaction_polling(self, signature: str, commitment: str = "confirmed") -> bool:
+        """Fallback polling method for transaction confirmation"""
+        try:
+            self.client.confirm_transaction(signature, commitment=commitment)
+            self.logger.info(f"Transaction {signature[:8]}... confirmed via polling")
+            return True
+        except Exception as e:
+            self.logger.error(f"Polling confirmation failed for {signature[:8]}...: {e}")
+            return False
 
     # ---------- Helpers kompatibilitas & error ----------
     @staticmethod
@@ -160,10 +218,11 @@ class SolanaClient:
             sig = getattr(resp, "value", None)
             if not sig:
                 return f"Error: RPC returned no signature: {resp}"
+            # Use WebSocket for faster confirmation
             try:
-                self.client.confirm_transaction(sig, commitment="confirmed")
-            except Exception:
-                pass
+                await self._confirm_transaction_ws(str(sig), commitment="confirmed")
+            except Exception as e:
+                self.logger.warning(f"Fast confirmation failed: {e}")
             return str(sig)
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
@@ -220,10 +279,11 @@ class SolanaClient:
             sig = getattr(resp, "value", None)
             if not sig:
                 return f"Error: RPC returned no signature: {resp}"
+            # Use WebSocket for faster confirmation
             try:
-                self.client.confirm_transaction(sig, commitment="confirmed")
-            except Exception:
-                pass
+                await self._confirm_transaction_ws(str(sig), commitment="confirmed")
+            except Exception as e:
+                self.logger.warning(f"Fast confirmation failed: {e}")
             return str(sig)
         except Exception as e:
             return f"Error: {self._format_exc(e)}"
