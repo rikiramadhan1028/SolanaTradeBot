@@ -11,7 +11,7 @@ from copy_trading import copytrading_loop
 from enum import Enum
 
 
-# Import CU price configuration
+# Import CU price configuration and user settings
 from cu_config import (
     choose_cu_price, 
     cu_to_sol_priority_fee,
@@ -21,8 +21,70 @@ from cu_config import (
     DEX_CU_PRICE_MICRO_ULTRA,
     PriorityTier
 )
+from user_settings import UserSettings
 
+# Global default CU price (fallback)
 cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
+
+def get_user_cu_price(user_id: str) -> Optional[int]:
+    """Get CU price for specific user, with fallback to global default."""
+    user_cu = UserSettings.get_user_cu_price(str(user_id))
+    return user_cu if user_cu is not None else cu_price
+
+async def handle_admin_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to view user settings statistics."""
+    if not is_admin(update.effective_user.id):
+        return
+    
+    try:
+        # Import database functions directly for admin stats
+        from database import user_settings_count, user_settings_list_all
+        
+        total_count = user_settings_count()
+        if total_count == 0:
+            await update.message.reply_html("📊 No user settings found in MongoDB.")
+            return
+        
+        stats_msg = "📊 <b>User Settings Statistics (MongoDB)</b>\n\n"
+        
+        tier_counts = {"off": 0, "fast": 0, "turbo": 0, "ultra": 0, "custom": 0}
+        
+        all_docs = user_settings_list_all()
+        for doc in all_docs:
+            cu_price = doc.get("cu_price")
+            tier = doc.get("priority_tier", "off")
+            
+            if cu_price is None:
+                tier_counts["off"] += 1
+            elif tier in tier_counts:
+                tier_counts[tier] += 1
+            else:
+                tier_counts["custom"] += 1
+        
+        stats_msg += f"👥 <b>Total Users:</b> {total_count}\n\n"
+        stats_msg += f"🔴 OFF: {tier_counts['off']} users\n"
+        stats_msg += f"🟡 FAST: {tier_counts['fast']} users\n"
+        stats_msg += f"🟠 TURBO: {tier_counts['turbo']} users\n" 
+        stats_msg += f"🔥 ULTRA: {tier_counts['ultra']} users\n"
+        stats_msg += f"✏️ CUSTOM: {tier_counts['custom']} users\n\n"
+        
+        # Show sample users
+        stats_msg += "<b>Sample Users:</b>\n"
+        for i, doc in enumerate(all_docs[:5]):
+            user_id = doc.get("user_id")
+            cu_price = doc.get("cu_price")
+            tier_display = _tier_of(cu_price)
+            stats_msg += f"• {user_id}: {tier_display}\n"
+        
+        if len(all_docs) > 5:
+            stats_msg += f"... and {len(all_docs) - 5} more users\n"
+        
+        await update.message.reply_html(stats_msg)
+        
+    except ImportError:
+        await update.message.reply_html("❌ MongoDB database not available.")
+    except Exception as e:
+        await update.message.reply_html(f"❌ Error getting user stats: {e}")
 
 # CU Settings conversation states
 SET_CU_PRICE = 1
@@ -1398,7 +1460,9 @@ async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYP
     q = update.callback_query
     await q.answer()
     
-    current = _tier_of(cu_price)
+    user_id = str(update.effective_user.id)
+    user_cu_price = get_user_cu_price(user_id)
+    current = _tier_of(user_cu_price)
     text = f"⚙️ <b>Settings</b>\n\n📊 Current Priority: <code>{current}</code>\n\nSelect priority level:"
     
     keyboard = [
@@ -1418,10 +1482,10 @@ async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle priority tier selection."""
-    global cu_price
     q = update.callback_query
     await q.answer()
     
+    user_id = str(update.effective_user.id)
     choice = q.data.split(":", 1)[1]  # "set_cu:off" -> "off"
     
     if choice == "custom":
@@ -1434,42 +1498,57 @@ async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT
         )
         return SET_CU_PRICE
     elif choice == "off":
-        cu_price = None
+        user_cu_price = None
+        tier_name = "OFF"
         note = "Priority fee set to OFF (0 μ-lamports/CU)."
     elif choice == "fast":
-        cu_price = DEX_CU_PRICE_MICRO_FAST
-        note = f"FAST set to {cu_price} μ-lamports/CU."
+        user_cu_price = DEX_CU_PRICE_MICRO_FAST
+        tier_name = "FAST"
+        note = f"FAST set to {user_cu_price} μ-lamports/CU."
     elif choice == "turbo":
-        cu_price = DEX_CU_PRICE_MICRO_TURBO
-        note = f"TURBO set to {cu_price} μ-lamports/CU."
+        user_cu_price = DEX_CU_PRICE_MICRO_TURBO
+        tier_name = "TURBO"
+        note = f"TURBO set to {user_cu_price} μ-lamports/CU."
     elif choice == "ultra":
-        cu_price = DEX_CU_PRICE_MICRO_ULTRA
-        note = f"ULTRA set to {cu_price} μ-lamports/CU."
+        user_cu_price = DEX_CU_PRICE_MICRO_ULTRA
+        tier_name = "ULTRA"
+        note = f"ULTRA set to {user_cu_price} μ-lamports/CU."
     else:
         note = "Unknown option."
+        user_cu_price = None
+        tier_name = "UNKNOWN"
+
+    # Save to persistent storage
+    UserSettings.set_user_cu_price(user_id, user_cu_price)
+    UserSettings.set_user_priority_tier(user_id, tier_name.lower() if tier_name != "OFF" else None)
 
     await q.edit_message_text(
-        f"✅ {note}\nCurrent: <code>{_tier_of(cu_price)}</code>",
+        f"✅ {note}\nCurrent: <code>{_tier_of(user_cu_price)}</code>",
         parse_mode="HTML",
         reply_markup=_settings_keyboard(),
     )
 
 async def handle_custom_cu_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle custom CU price input."""
-    global cu_price
     if not context.user_data.get("awaiting_custom_cu"):
         return SET_CU_PRICE
     
+    user_id = str(update.effective_user.id)
     txt = (update.message.text or "").strip()
     try:
         # accept plain int; also support units like '2_000'
         val = int(txt.replace("_", ""))
         if val < 0 or val > 10_000_000:
             raise ValueError("out_of_range")
-        cu_price = val if val > 0 else None
+        user_cu_price = val if val > 0 else None
+        
+        # Save to persistent storage
+        UserSettings.set_user_cu_price(user_id, user_cu_price)
+        UserSettings.set_user_priority_tier(user_id, "custom" if user_cu_price else None)
+        
         context.user_data.pop("awaiting_custom_cu", None)
         await update.message.reply_html(
-            f"✅ Custom priority set to <code>{_tier_of(cu_price)}</code>.",
+            f"✅ Custom priority set to <code>{_tier_of(user_cu_price)}</code>.",
             reply_markup=_settings_keyboard(),
         )
         return ConversationHandler.END
@@ -1863,6 +1942,7 @@ async def perform_trade(
                 amt_param = float(amount)
                 denom_sol = True  # buy by SOL
 
+            user_cu_price = get_user_cu_price(str(user_id))
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
                 action=trade_type,
@@ -1870,15 +1950,16 @@ async def perform_trade(
                 amount=amt_param,
                 denominated_in_sol=denom_sol,
                 slippage_bps=slip_pct * 100,  # convert percentage to basis points
-                compute_unit_price_micro_lamports=cu_price,
+                compute_unit_price_micro_lamports=user_cu_price,
                 pool="auto",
             )
         else:
+            user_cu_price = get_user_cu_price(str(user_id))
             res = await dex_swap(
                 private_key=wallet["private_key"],
                 **prep["params"],
                 priority_fee_sol=0.0,
-                compute_unit_price_micro_lamports=cu_price,
+                compute_unit_price_micro_lamports=user_cu_price,
             )
 
         # handle sukses/gagal + update posisi
@@ -2235,6 +2316,7 @@ def main() -> None:
 
     # --- Command & other conversations ---
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("userstats", handle_admin_user_stats))
     application.add_handler(trade_conv_handler)
     application.add_handler(pumpfun_conv_handler)
 

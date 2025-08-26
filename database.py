@@ -277,3 +277,89 @@ def position_upsert(doc: dict):
 
 def position_list(user_id: int):
     return list(positions_collection.find({"user_id": int(user_id)}))
+
+# ===== User Settings (per user preferences) =====
+# doc shape:
+# {
+#   user_id: int,
+#   cu_price: int|None,          # compute unit price (micro-lamports per CU)
+#   priority_tier: str|None,     # "fast", "turbo", "ultra", "custom", or None
+#   updated_at: int,
+# }
+user_settings_collection = db["user_settings"]
+user_settings_collection.create_index([("user_id", ASCENDING)], unique=True)
+
+def user_settings_get(user_id: int) -> dict:
+    """Get user settings document or empty dict if not found."""
+    doc = user_settings_collection.find_one({"user_id": int(user_id)})
+    return doc if doc else {}
+
+def user_settings_upsert(user_id: int, cu_price: int = None, priority_tier: str = None) -> None:
+    """Update or insert user settings."""
+    doc = {
+        "user_id": int(user_id),
+        "updated_at": int(time.time())
+    }
+    
+    # Only set fields that are provided (allow None to clear values)
+    if cu_price is not None:
+        doc["cu_price"] = int(cu_price)
+    elif cu_price is None:
+        doc["cu_price"] = None
+        
+    if priority_tier is not None:
+        doc["priority_tier"] = str(priority_tier) if priority_tier else None
+    elif priority_tier is None:
+        doc["priority_tier"] = None
+
+    user_settings_collection.update_one(
+        {"user_id": int(user_id)},
+        {"$set": doc},
+        upsert=True,
+    )
+
+def user_settings_get_cu_price(user_id: int) -> int:
+    """Get user's CU price setting or None."""
+    doc = user_settings_get(user_id)
+    return doc.get("cu_price")
+
+def user_settings_set_cu_price(user_id: int, cu_price: int = None) -> None:
+    """Set user's CU price setting."""
+    user_settings_collection.update_one(
+        {"user_id": int(user_id)},
+        {"$set": {
+            "user_id": int(user_id),
+            "cu_price": int(cu_price) if cu_price is not None else None,
+            "updated_at": int(time.time())
+        }},
+        upsert=True,
+    )
+
+def user_settings_get_priority_tier(user_id: int) -> str:
+    """Get user's priority tier setting or None."""
+    doc = user_settings_get(user_id)
+    return doc.get("priority_tier")
+
+def user_settings_set_priority_tier(user_id: int, priority_tier: str = None) -> None:
+    """Set user's priority tier setting."""
+    user_settings_collection.update_one(
+        {"user_id": int(user_id)},
+        {"$set": {
+            "user_id": int(user_id),
+            "priority_tier": str(priority_tier) if priority_tier else None,
+            "updated_at": int(time.time())
+        }},
+        upsert=True,
+    )
+
+def user_settings_remove(user_id: int) -> None:
+    """Remove all settings for a user."""
+    user_settings_collection.delete_one({"user_id": int(user_id)})
+
+def user_settings_list_all() -> list:
+    """Get list of all users with settings."""
+    return list(user_settings_collection.find())
+
+def user_settings_count() -> int:
+    """Get count of users with settings."""
+    return user_settings_collection.count_documents({})
