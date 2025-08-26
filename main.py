@@ -23,6 +23,18 @@ from cu_config import (
 )
 from user_settings import UserSettings
 
+# Telegram imports
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ConversationHandler,
+)
+
 # Global default CU price (fallback)
 cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
 
@@ -30,6 +42,11 @@ def get_user_cu_price(user_id: str) -> Optional[int]:
     """Get CU price for specific user, with fallback to global default."""
     user_cu = UserSettings.get_user_cu_price(str(user_id))
     return user_cu if user_cu is not None else cu_price
+
+def is_admin(user_id: int) -> bool:
+    """Check if user is an admin."""
+    admin_ids = os.getenv("ADMIN_USER_IDS", "").split(",")
+    return str(user_id) in [admin_id.strip() for admin_id in admin_ids if admin_id.strip()]
 
 async def handle_admin_user_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to view user settings statistics."""
@@ -105,17 +122,6 @@ import config
 import database
 import wallet_manager
 from blockchain_clients.solana_client import SolanaClient
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler,
-)
 
 # === Fast refresh infra (HTTP client + caches) ===
 import time
