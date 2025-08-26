@@ -37,6 +37,13 @@ coverage/
 .pytest_cache/
 *.cover
 
+# ⛔ Temporary test files
+test_*.py
+*_test.py
+disable_websocket.py
+enable_websocket.py
+hybrid_client_example.py
+
 # ⛔ Jupyter notebooks checkpoints
 .ipynb_checkpoints
 

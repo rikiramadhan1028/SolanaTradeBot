@@ -50,21 +50,70 @@ class SolanaClient:
     def __init__(self, rpc_url: str):
         self.client = Client(rpc_url)
         self.rpc_url = rpc_url
+        self.logger = logging.getLogger(__name__)  # Initialize logger first
         self.ws_url = self._get_ws_url(rpc_url)
         self.ws_manager = None
-        self.logger = logging.getLogger(__name__)
     
     def _get_ws_url(self, rpc_url: str) -> str:
-        """Convert HTTP RPC URL to WebSocket URL"""
-        if rpc_url.startswith("https://"):
-            return rpc_url.replace("https://", "wss://")
-        elif rpc_url.startswith("http://"):
-            return rpc_url.replace("http://", "ws://")
+        """Convert HTTP RPC URL to WebSocket URL with provider-specific handling"""
+        
+        # Handle different RPC providers with their specific WebSocket endpoints
+        if "quiknode.pro" in rpc_url.lower():
+            # QuickNode uses different WebSocket endpoints
+            # They don't support WebSocket subscriptions on the same endpoint
+            self.logger.warning("QuickNode detected: WebSocket subscriptions not supported on HTTP endpoint")
+            return None
+            
+        elif "helius-rpc.com" in rpc_url.lower():
+            # Helius WebSocket endpoint
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+                
+        elif "alchemy.com" in rpc_url.lower():
+            # Alchemy WebSocket endpoint  
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+                
+        elif "ankr.com" in rpc_url.lower():
+            # Ankr WebSocket endpoint
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+                
+        elif "mainnet-beta.solana.com" in rpc_url.lower():
+            # Official Solana RPC
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+                
+        elif "rpcpool.com" in rpc_url.lower():
+            # RPCPool WebSocket endpoint
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+                
+        else:
+            # Generic conversion for other providers
+            self.logger.info(f"Unknown RPC provider, attempting generic WebSocket conversion: {rpc_url}")
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+        
         return rpc_url
     
     async def _ensure_ws_connection(self) -> bool:
         """Ensure WebSocket connection is available"""
         if not WEBSOCKET_AVAILABLE:
+            return False
+        if not self.ws_url:  # WebSocket not supported for this provider
             return False
         if not self.ws_manager:
             self.ws_manager = SolanaWebSocketManager(self.ws_url)
