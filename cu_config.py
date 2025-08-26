@@ -52,4 +52,5 @@ def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 20
     if cu_price_micro is None or cu_price_micro <= 0:
         return PRIORITY_FEE_SOL_DEFAULT  # use consistent default
     # Formula: (cu_price_micro * estimated_cu) / 1e9 = priority fee in SOL
-    return max(PRIORITY_FEE_SOL_DEFAULT, (cu_price_micro * estimated_cu) / 1e9)
+    # No caps - user has full control over custom values
+    return (cu_price_micro * estimated_cu) / 1e9
