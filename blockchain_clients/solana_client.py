@@ -32,7 +32,7 @@ from spl.token.instructions import (
 from spl.token.constants import TOKEN_PROGRAM_ID
 
 # ===== Impor Telah Direvisi =====
-from cu_config import cu_to_sol_priority_fee
+from cu_config import cu_to_sol_priority_fee, choose_priority_fee_sol
 from dex_integrations.metis_jupiter import get_quote, build_swap_tx
 from dex_integrations.raydium_aggregator import (
     get_swap_quote as raydium_get_quote,

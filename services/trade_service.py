@@ -2,7 +2,7 @@
 import os
 import httpx
 from typing import Any, Dict, Optional
-from cu_config import cu_to_sol_priority_fee
+from cu_config import cu_to_sol_priority_fee, choose_priority_fee_sol, sol_to_cu_price
 
 # ---- Base URL normalizer ----
 _raw = os.getenv("TRADE_SVC_URL", "http://localhost:8080").strip().rstrip("/")
@@ -101,6 +101,7 @@ async def pumpfun_swap(
     use_jito: bool = False,
     slippage: Optional[int] = None,
     priority_fee: float = 0.00005,
+    priority_tier: Optional[str] = None,  # NEW: "fast", "turbo", "ultra"
     compute_unit_price_micro_lamports: Optional[int] = None,
 ) -> Dict[str, Any]:
     act = (action or "").lower().strip()
@@ -121,10 +122,16 @@ async def pumpfun_swap(
     except Exception:
         public_key = ""
 
-    # Calculate priority fee from CU if provided
-    final_priority_fee = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
-    if compute_unit_price_micro_lamports is None:
-        final_priority_fee = priority_fee  # fallback to original parameter
+    # UNIFIED PRIORITY FEE LOGIC
+    final_priority_fee = priority_fee  # default fallback
+    
+    # Priority 1: Use tier if specified (NEW)
+    if priority_tier:
+        final_priority_fee = choose_priority_fee_sol(priority_tier)
+    # Priority 2: Convert CU to SOL if specified (legacy)
+    elif compute_unit_price_micro_lamports is not None:
+        final_priority_fee = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
+    # Priority 3: Use direct SOL amount (original parameter)
 
     payload = {
         "privateKey": private_key, "useJito": bool(use_jito),
@@ -145,14 +152,14 @@ async def dex_swap(
     dex: str = "jupiter",
     slippage_bps: int = 50,
     priority_fee_sol: float = 0.0,
+    priority_tier: Optional[str] = None,  # NEW: "fast", "turbo", "ultra"
     compute_unit_price_micro_lamports: Optional[int] = None,
     exact_out: bool = False,
     force_legacy: bool = False,
 ) -> Dict[str, Any]:
     """
-    Kirim permintaan swap ke trade-svc (/dex/swap) dengan logika prioritas fee.
-    - `compute_unit_price_micro_lamports` (per-CU) akan diutamakan.
-    - `priority_fee_sol` (total) hanya digunakan jika fee per-CU tidak di-set.
+    Kirim permintaan swap ke trade-svc (/dex/swap) dengan unified priority fee logic.
+    Priority order: 1) priority_tier, 2) compute_unit_price_micro_lamports, 3) priority_fee_sol
     """
     payload: Dict[str, Any] = {
         "privateKey": private_key,
@@ -165,13 +172,24 @@ async def dex_swap(
         "forceLegacy": bool(force_legacy),
     }
     
-    # Terapkan logika prioritas untuk fee agar tidak bertabrakan
-    if compute_unit_price_micro_lamports is not None:
-        # Jika ada, UTAMAKAN yang ini
-        payload["computeUnitPriceMicroLamports"] = int(compute_unit_price_micro_lamports)
-    else:
-        # Jika tidak ada, baru pakai yang lama sebagai FALLBACK
-        payload["priorityFee"] = float(priority_fee_sol)
+    # UNIFIED PRIORITY FEE LOGIC
+    final_priority_fee_sol = priority_fee_sol  # default fallback
+    
+    # Priority 1: Use tier if specified (NEW)
+    if priority_tier:
+        final_priority_fee_sol = choose_priority_fee_sol(priority_tier)
+    # Priority 2: Convert CU to SOL if specified (legacy)
+    elif compute_unit_price_micro_lamports is not None:
+        final_priority_fee_sol = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
+    # Priority 3: Use direct SOL amount (original parameter)
+    
+    # Always use SOL-based priority fee for consistency
+    payload["priorityFee"] = float(final_priority_fee_sol)
+    
+    # Also provide CU-based for backends that need it
+    if final_priority_fee_sol > 0:
+        cu_price = sol_to_cu_price(final_priority_fee_sol, 200000)
+        payload["computeUnitPriceMicroLamports"] = cu_price
         
     return await _request("POST", "/dex/swap", json=payload)
 

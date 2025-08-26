@@ -15,10 +15,14 @@ from enum import Enum
 from cu_config import (
     choose_cu_price, 
     cu_to_sol_priority_fee,
+    choose_priority_fee_sol,
     DEX_CU_PRICE_MICRO_DEFAULT, 
     DEX_CU_PRICE_MICRO_FAST, 
     DEX_CU_PRICE_MICRO_TURBO, 
     DEX_CU_PRICE_MICRO_ULTRA,
+    PRIORITY_FEE_SOL_FAST,
+    PRIORITY_FEE_SOL_TURBO, 
+    PRIORITY_FEE_SOL_ULTRA,
     PriorityTier
 )
 from user_settings import UserSettings
@@ -42,6 +46,20 @@ def get_user_cu_price(user_id: str) -> Optional[int]:
     """Get CU price for specific user, with fallback to global default."""
     user_cu = UserSettings.get_user_cu_price(str(user_id))
     return user_cu if user_cu is not None else cu_price
+
+def get_user_priority_tier(user_id: str) -> Optional[str]:
+    """Get user's priority tier based on their CU price setting."""
+    user_cu = get_user_cu_price(user_id)
+    if user_cu is None or user_cu == 0:
+        return None
+    elif user_cu == DEX_CU_PRICE_MICRO_FAST:
+        return "fast"
+    elif user_cu == DEX_CU_PRICE_MICRO_TURBO:
+        return "turbo"
+    elif user_cu == DEX_CU_PRICE_MICRO_ULTRA:
+        return "ultra"
+    else:
+        return None  # Custom CU price, no tier
 
 def is_admin(user_id: int) -> bool:
     """Check if user is an admin."""
@@ -1506,19 +1524,22 @@ async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT
     elif choice == "off":
         user_cu_price = None
         tier_name = "OFF"
-        note = "Priority fee set to OFF (0 μ-lamports/CU)."
+        note = "Priority fee set to OFF (no extra fee)."
     elif choice == "fast":
         user_cu_price = DEX_CU_PRICE_MICRO_FAST
         tier_name = "FAST"
-        note = f"FAST set to {user_cu_price} μ-lamports/CU."
+        fee_sol = PRIORITY_FEE_SOL_FAST
+        note = f"FAST tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
     elif choice == "turbo":
         user_cu_price = DEX_CU_PRICE_MICRO_TURBO
         tier_name = "TURBO"
-        note = f"TURBO set to {user_cu_price} μ-lamports/CU."
+        fee_sol = PRIORITY_FEE_SOL_TURBO
+        note = f"TURBO tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
     elif choice == "ultra":
         user_cu_price = DEX_CU_PRICE_MICRO_ULTRA
         tier_name = "ULTRA"
-        note = f"ULTRA set to {user_cu_price} μ-lamports/CU."
+        fee_sol = PRIORITY_FEE_SOL_ULTRA
+        note = f"ULTRA tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
     else:
         note = "Unknown option."
         user_cu_price = None
@@ -1948,7 +1969,10 @@ async def perform_trade(
                 amt_param = float(amount)
                 denom_sol = True  # buy by SOL
 
-            user_cu_price = get_user_cu_price(str(user_id))
+            # Use priority tier system for better fee management
+            user_priority_tier = get_user_priority_tier(str(user_id))
+            user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
+            
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
                 action=trade_type,
@@ -1956,16 +1980,21 @@ async def perform_trade(
                 amount=amt_param,
                 denominated_in_sol=denom_sol,
                 slippage_bps=slip_pct * 100,  # convert percentage to basis points
-                compute_unit_price_micro_lamports=user_cu_price,
+                priority_tier=user_priority_tier,  # NEW: Use tier system
+                compute_unit_price_micro_lamports=user_cu_price,  # Fallback
                 pool="auto",
             )
         else:
-            user_cu_price = get_user_cu_price(str(user_id))
+            # Use priority tier system for DEX swaps too
+            user_priority_tier = get_user_priority_tier(str(user_id))
+            user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
+            
             res = await dex_swap(
                 private_key=wallet["private_key"],
                 **prep["params"],
-                priority_fee_sol=0.0,
-                compute_unit_price_micro_lamports=user_cu_price,
+                priority_tier=user_priority_tier,  # NEW: Use tier system
+                priority_fee_sol=0.0,  # Will be overridden by tier system
+                compute_unit_price_micro_lamports=user_cu_price,  # Fallback
             )
 
         # handle sukses/gagal + update posisi

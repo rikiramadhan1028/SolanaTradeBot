@@ -3,7 +3,7 @@ import base64
 from typing import Union, Optional, List
 import httpx
 import os
-from cu_config import choose_cu_price, cu_to_sol_priority_fee
+from cu_config import choose_cu_price, cu_to_sol_priority_fee, choose_priority_fee_sol
 
 PUMPPORTAL_TRADE_LOCAL = "https://pumpportal.fun/api/trade-local"
 
