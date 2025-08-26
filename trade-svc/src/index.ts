@@ -230,7 +230,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
     useJito = false,
     bundleCount = 1,
     slippage = 10,
-    priorityFee = 0.00005,
+    priorityFee = 0.00005, // Default fallback - will be overridden by client tier system
     pool, // Tambahkan pool
   } = req.body || {};
 

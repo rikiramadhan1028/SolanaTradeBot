@@ -100,7 +100,7 @@ async def pumpfun_swap(
     pool: Optional[str] = None,
     use_jito: bool = False,
     slippage: Optional[int] = None,
-    priority_fee: float = 0.00005,
+    priority_fee: Optional[float] = None,
     priority_tier: Optional[str] = None,  # NEW: "fast", "turbo", "ultra"
     compute_unit_price_micro_lamports: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -123,7 +123,7 @@ async def pumpfun_swap(
         public_key = ""
 
     # UNIFIED PRIORITY FEE LOGIC
-    final_priority_fee = priority_fee  # default fallback
+    final_priority_fee = None
     
     # Priority 1: Use tier if specified (NEW)
     if priority_tier:
@@ -131,7 +131,13 @@ async def pumpfun_swap(
     # Priority 2: Convert CU to SOL if specified (legacy)
     elif compute_unit_price_micro_lamports is not None:
         final_priority_fee = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
-    # Priority 3: Use direct SOL amount (original parameter)
+    # Priority 3: Use direct SOL amount if explicitly provided
+    elif priority_fee is not None:
+        final_priority_fee = priority_fee
+    # Priority 4: Use system default if nothing specified
+    else:
+        from cu_config import PRIORITY_FEE_SOL_DEFAULT
+        final_priority_fee = PRIORITY_FEE_SOL_DEFAULT
 
     payload = {
         "privateKey": private_key, "useJito": bool(use_jito),

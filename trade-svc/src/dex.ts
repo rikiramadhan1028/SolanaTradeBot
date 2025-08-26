@@ -111,7 +111,7 @@ async function ensureSufficientBalances(opts: {
   const rentAta = await c.getMinimumBalanceForRentExemption(ATA_SIZE);
 
   // Base required fees (rough safety margin)
-  let required = 10_000; // ~0.00001 SOL
+  let required = 10_000; // Base transaction fees (excluding priority fees)
 
   // If input is SOL: need to fund WSOL temp account + amount
   if (inputMint === NATIVE_SOL) {

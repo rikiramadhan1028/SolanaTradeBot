@@ -16,7 +16,7 @@ export async function tradeLocalSingle(req: {
     amount: typeof req.amount === 'string' ? req.amount : Number(req.amount),
     denominatedInSol: boolStr(req.action === 'buy' && !(typeof req.amount === 'string' && req.amount.endsWith('%'))),
     slippage: req.slippage ?? 10,
-    priorityFee: req.priorityFee ?? 0.00005,
+    priorityFee: req.priorityFee ?? 0.00005, // Default fallback - will be overridden by client tier system
     pool: req.pool ?? 'auto',
   };
   const r = await axios.post(url, payload, { responseType: 'arraybuffer', validateStatus: () => true });

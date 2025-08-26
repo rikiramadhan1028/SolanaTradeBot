@@ -450,7 +450,9 @@ class SolanaClient:
                 return "Error: Invalid recipient address format"
 
             lamports = int(amount * 1_000_000_000)
-            estimated_fee_sol = 0.000005
+            # Use system default priority fee for estimation
+            from cu_config import PRIORITY_FEE_SOL_DEFAULT
+            estimated_fee_sol = PRIORITY_FEE_SOL_DEFAULT
             current_balance = self.get_balance(str(sender_pubkey))
             total_needed = amount + estimated_fee_sol
             if current_balance < total_needed:

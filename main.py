@@ -1739,7 +1739,9 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
     if not FEE_ENABLED:
         return None
     fee_ui = _fee_ui(ui_amount)
-    if fee_ui <= 0.00001:
+    # Use minimum threshold based on system default priority fee
+    from cu_config import PRIORITY_FEE_SOL_DEFAULT
+    if fee_ui <= PRIORITY_FEE_SOL_DEFAULT:
         return None
     print(f"Attempting to send {fee_ui:.6f} SOL fee ({reason}) to {FEE_WALLET}")
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
