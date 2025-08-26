@@ -7,7 +7,7 @@ import httpx
 import database
 from typing import Optional
 from services.trade_service import dex_swap
-from cu_config import choose_cu_price
+from cu_config import choose_cu_price, choose_priority_fee_sol
 
 
 from services.trade_service import dex_swap, svc_get_sol_balance, svc_get_mint_decimals, svc_get_token_balance
@@ -178,7 +178,7 @@ async def _exec_for_followers(leader_addr: str, event: Dict[str, Any]) -> None:
                     amount_lamports=amount_lamports,
                     dex="jupiter",
                     slippage_bps=slip_bps,
-                    priority_fee_sol=0.0,
+                    priority_tier=PRIORITY_TIER or None,  # Use global priority tier
                 )
 
             else:  # SELL
@@ -217,7 +217,7 @@ async def _exec_for_followers(leader_addr: str, event: Dict[str, Any]) -> None:
                     amount_lamports=amount_lamports,
                     dex="jupiter",
                     slippage_bps=slip_bps,
-                    priority_fee_sol=0.0,
+                    priority_tier=PRIORITY_TIER or None,  # Use global priority tier
                 )
 
         except Exception as e:
@@ -272,7 +272,7 @@ async def copytrading_loop(stop_event: asyncio.Event):
         await asyncio.sleep(COPY_POLL_INTERVAL)
 
 async def execute_jupiter_swap(private_key: str, in_mint: str, out_mint: str, amount_raw: int, slippage_bps: int = 50):
-    cu_price = choose_cu_price(PRIORITY_TIER)
+    # Use unified priority tier system instead of mixed parameters
     return await dex_swap(
         private_key=private_key,
         input_mint=in_mint,
@@ -280,6 +280,5 @@ async def execute_jupiter_swap(private_key: str, in_mint: str, out_mint: str, am
         amount_lamports=amount_raw,
         dex="jupiter",
         slippage_bps=slippage_bps,
-        priority_fee_sol=0.0,
-        compute_unit_price_micro_lamports=cu_price,
+        priority_tier=PRIORITY_TIER or None,  # Use tier system
     )

@@ -1992,9 +1992,8 @@ async def perform_trade(
             res = await dex_swap(
                 private_key=wallet["private_key"],
                 **prep["params"],
-                priority_tier=user_priority_tier,  # NEW: Use tier system
-                priority_fee_sol=0.0,  # Will be overridden by tier system
-                compute_unit_price_micro_lamports=user_cu_price,  # Fallback
+                priority_tier=user_priority_tier,  # Use tier system
+                compute_unit_price_micro_lamports=user_cu_price,  # Fallback for legacy
             )
 
         # handle sukses/gagal + update posisi
