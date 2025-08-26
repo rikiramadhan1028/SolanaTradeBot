@@ -74,10 +74,12 @@ class SolanaClient:
         
         # Handle different RPC providers with their specific WebSocket endpoints
         if "quiknode.pro" in rpc_url.lower():
-            # QuickNode uses different WebSocket endpoints
-            # They don't support WebSocket subscriptions on the same endpoint
-            self.logger.warning("QuickNode detected: WebSocket subscriptions not supported on HTTP endpoint")
-            return None
+            # QuickNode DOES support WebSocket subscriptions (verified by test)
+            if rpc_url.startswith("https://"):
+                return rpc_url.replace("https://", "wss://")
+            elif rpc_url.startswith("http://"):
+                return rpc_url.replace("http://", "ws://")
+            self.logger.info("QuickNode detected: WebSocket subscriptions enabled")
             
         elif "helius-rpc.com" in rpc_url.lower():
             # Helius WebSocket endpoint
