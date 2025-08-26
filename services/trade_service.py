@@ -12,8 +12,7 @@ TRADE_SVC_URL = _raw
 # Shared auth (jangan kosongin di prod)
 TRADE_SVC_TOKEN = os.getenv("TRADE_SVC_TOKEN", "").strip()
 
-# Default pool utk PumpPortal. Bisa override via env:
-#   PUMPFUN_POOL=auto|pump|raydium|raydium-cpmm|pump-amm|launchlab|bonk
+# Default pool utk PumpPortal
 PUMPFUN_DEFAULT_POOL = os.getenv("PUMPFUN_POOL", "auto").strip() or "auto"
 
 DEFAULT_HEADERS: Dict[str, str] = {
@@ -38,20 +37,19 @@ async def _request(
     json: Optional[Dict[str, Any]] = None,
     retries: int = 2,
 ) -> Dict[str, Any]:
-    global _client  # <-- PENTING: deklarasi global sebelum _client dipakai
+    global _client
     url = f"{TRADE_SVC_URL}{path}"
     attempt = 0
     while True:
         try:
             r = await _client.request(method.upper(), url, params=params, json=json)
-            # retry untuk 429/5xx
             if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 attempt += 1
                 try:
                     await _client.aclose()
                 except Exception:
                     pass
-                _client = httpx.AsyncClient(  # rebuild pool
+                _client = httpx.AsyncClient(
                     timeout=httpx.Timeout(20.0, connect=5.0, read=15.0),
                     limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
                     headers=DEFAULT_HEADERS,
@@ -79,7 +77,6 @@ async def _request(
 # ---- Public helpers ----
 
 async def derive_address(private_key: str) -> str:
-    # NB: jangan log private_key
     r = await _request("POST", "/derive-address", json={"privateKey": private_key})
     if isinstance(r, dict) and "address" in r:
         return str(r["address"])
@@ -97,30 +94,22 @@ async def pumpfun_swap(
     mint: str,
     amount,
     *,
-    denominated_in_sol: Optional[bool] = None,   # True kalau amount SOL; default: buy=True, sell=False
-    slippage_bps: Optional[int] = None,          # dari UI (bps) → dikonversi ke %
-    pool: Optional[str] = None,                  # default: env PUMPFUN_POOL
-    # kompat lama:
+    denominated_in_sol: Optional[bool] = None,
+    slippage_bps: Optional[int] = None,
+    pool: Optional[str] = None,
     use_jito: bool = False,
-    slippage: Optional[int] = None,              # persen (legacy)
-    priority_fee: float = 0.00005,               # SOL
+    slippage: Optional[int] = None,
+    priority_fee: float = 0.00005,
 ) -> Dict[str, Any]:
-    """
-    Payload disesuaikan dengan dokumen resmi PumpPortal /api/trade-local:
-      publicKey, action, mint, amount, denominatedInSol, slippage(%), priorityFee, pool
-    Node trade-svc kamu yang akan memanggil PumpPortal, menandatangani, dan mengirim tx.
-    """
     act = (action or "").lower().strip()
     if denominated_in_sol is None:
         denominated_in_sol = (act == "buy")
 
-    # slippage: prioritaskan bps -> %, fallback ke slippage (persen)
     if slippage_bps is not None:
         slip_pct = _bps_to_pct(slippage_bps)
     else:
         slip_pct = max(0, min(100, int(slippage or 10)))
 
-    # SELL dengan angka → kirim "X%" spt dokumen
     send_amount = amount
     if not denominated_in_sol and isinstance(amount, (int, float)):
         send_amount = f"{amount}%"
@@ -131,21 +120,13 @@ async def pumpfun_swap(
         public_key = ""
 
     payload = {
-        # untuk Node signer
-        "privateKey": private_key,
-        "useJito": bool(use_jito),
-
-        # untuk PumpPortal trade-local
-        "publicKey": public_key,
-        "action": act,
-        "mint": mint,
+        "privateKey": private_key, "useJito": bool(use_jito),
+        "publicKey": public_key, "action": act, "mint": mint,
         "amount": send_amount,
         "denominatedInSol": "true" if denominated_in_sol else "false",
-        "slippage": slip_pct,                 # persen
-        "priorityFee": float(priority_fee),   # SOL
+        "slippage": slip_pct, "priorityFee": float(priority_fee),
         "pool": (pool or PUMPFUN_DEFAULT_POOL),
     }
-
     return await _request("POST", "/pumpfun/swap", json=payload)
 
 async def dex_swap(
@@ -153,29 +134,47 @@ async def dex_swap(
     input_mint: str,
     output_mint: str,
     amount_lamports: int,
+    *,
     dex: str = "jupiter",
     slippage_bps: int = 50,
     priority_fee_sol: float = 0.0,
+    compute_unit_price_micro_lamports: Optional[int] = None,
+    exact_out: bool = False,
+    force_legacy: bool = False,
 ) -> Dict[str, Any]:
-    payload = {
+    """
+    Kirim permintaan swap ke trade-svc (/dex/swap) dengan logika prioritas fee.
+    - `compute_unit_price_micro_lamports` (per-CU) akan diutamakan.
+    - `priority_fee_sol` (total) hanya digunakan jika fee per-CU tidak di-set.
+    """
+    payload: Dict[str, Any] = {
         "privateKey": private_key,
         "inputMint": input_mint,
         "outputMint": output_mint,
         "amountLamports": int(amount_lamports),
         "dex": dex,
         "slippageBps": int(slippage_bps),
-        "priorityFee": float(priority_fee_sol),
+        "exactOut": bool(exact_out),
+        "forceLegacy": bool(force_legacy),
     }
+    
+    # Terapkan logika prioritas untuk fee agar tidak bertabrakan
+    if compute_unit_price_micro_lamports is not None:
+        # Jika ada, UTAMAKAN yang ini
+        payload["computeUnitPriceMicroLamports"] = int(compute_unit_price_micro_lamports)
+    else:
+        # Jika tidak ada, baru pakai yang lama sebagai FALLBACK
+        payload["priorityFee"] = float(priority_fee_sol)
+        
     return await _request("POST", "/dex/swap", json=payload)
+
 
 # ---- Wallet/Meta helpers (GET) ----
 
 async def svc_get_sol_balance(address: str) -> float:
     r = await _request("GET", f"/wallet/{address}/balance")
-    try:
-        return float(r.get("sol", 0.0))
-    except Exception:
-        return 0.0
+    try: return float(r.get("sol", 0.0))
+    except Exception: return 0.0
 
 async def svc_get_token_balances(address: str, min_amount: float = 0.0):
     params = {"min": str(min_amount)} if min_amount > 0 else None
@@ -184,14 +183,10 @@ async def svc_get_token_balances(address: str, min_amount: float = 0.0):
 
 async def svc_get_token_balance(address: str, mint: str) -> float:
     r = await _request("GET", f"/wallet/{address}/token/{mint}/balance")
-    try:
-        return float(r.get("amount", 0.0))
-    except Exception:
-        return 0.0
+    try: return float(r.get("amount", 0.0))
+    except Exception: return 0.0
 
 async def svc_get_mint_decimals(mint: str) -> int:
     r = await _request("GET", f"/wallet/mint/{mint}/decimals")
-    try:
-        return int(r.get("decimals", 6))
-    except Exception:
-        return 6
+    try: return int(r.get("decimals", 6))
+    except Exception: return 6

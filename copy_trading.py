@@ -3,12 +3,15 @@ import os
 import asyncio
 import time
 from typing import Dict, Any, List, Optional, Tuple
-
 import httpx
-
 import database
-from services.trade_service import dex_swap, svc_get_sol_balance, svc_get_mint_decimals, svc_get_token_balance
+from typing import Optional
+from services.trade_service import dex_swap
+from main import choose_cu_price
 
+
+from services.trade_service import dex_swap, svc_get_sol_balance, svc_get_mint_decimals, svc_get_token_balance
+PRIORITY_TIER = os.getenv("PRIORITY_TIER", "") # fast|turbo|ultra|''
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
 HELIUS_RPC = os.getenv("HELIUS_RPC", "").strip()  # optional: custom helius rpc
 HELIUS_REST = f"https://api.helius.xyz/v0/addresses"  # enhanced tx endpoint
@@ -267,3 +270,16 @@ async def copytrading_loop(stop_event: asyncio.Event):
             print(f"[copy] loop error: {e}")
 
         await asyncio.sleep(COPY_POLL_INTERVAL)
+
+async def execute_jupiter_swap(private_key: str, in_mint: str, out_mint: str, amount_raw: int, slippage_bps: int = 50):
+    cu_price = choose_cu_price(PRIORITY_TIER)
+    return await dex_swap(
+        private_key=private_key,
+        input_mint=in_mint,
+        output_mint=out_mint,
+        amount_lamports=amount_raw,
+        dex="jupiter",
+        slippage_bps=slippage_bps,
+        priority_fee_sol=0.0,
+        compute_unit_price_micro_lamports=cu_price,
+    )

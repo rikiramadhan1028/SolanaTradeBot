@@ -8,7 +8,33 @@ import httpx
 from datetime import datetime, timezone
 from typing import Optional
 from copy_trading import copytrading_loop
+from enum import Enum
 
+
+# Default per-CU (micro-lamports) — bisa dioverride ENV
+DEX_CU_PRICE_MICRO_DEFAULT = int(os.getenv("DEX_CU_PRICE_MICRO", "0"))
+DEX_CU_PRICE_MICRO_FAST = int(os.getenv("DEX_CU_PRICE_MICRO_FAST", "500"))
+DEX_CU_PRICE_MICRO_TURBO = int(os.getenv("DEX_CU_PRICE_MICRO_TURBO", "2000"))
+DEX_CU_PRICE_MICRO_ULTRA = int(os.getenv("DEX_CU_PRICE_MICRO_ULTRA", "10000"))
+
+class PriorityTier(str, Enum):
+    FAST = "fast"
+    TURBO = "turbo"
+    ULTRA = "ultra"
+
+def choose_cu_price(tier: Optional[str]) -> Optional[int]:
+    if not tier:
+        return DEX_CU_PRICE_MICRO_DEFAULT or None
+    t = str(tier).lower()
+    if t == PriorityTier.FAST: return DEX_CU_PRICE_MICRO_FAST
+    if t == PriorityTier.TURBO: return DEX_CU_PRICE_MICRO_TURBO
+    if t == PriorityTier.ULTRA: return DEX_CU_PRICE_MICRO_ULTRA
+    return DEX_CU_PRICE_MICRO_DEFAULT or None
+
+cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
+
+# CU Settings conversation states
+SET_CU_PRICE = 1
 # -------- env must be loaded BEFORE os.getenv is called --------
 from dotenv import load_dotenv
 load_dotenv()
@@ -1347,6 +1373,118 @@ async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back_markup("back_to_main_menu"),
     )
 
+# --- CU Settings UI Functions ---
+def _tier_of(cu_val: Optional[int]) -> str:
+    """Return a display string for the current CU price."""
+    if cu_val is None or cu_val == 0:
+        return "OFF (0 μ-lamports/CU)"
+    elif cu_val == DEX_CU_PRICE_MICRO_FAST:
+        return f"FAST ({cu_val} μ-lamports/CU)"
+    elif cu_val == DEX_CU_PRICE_MICRO_TURBO:
+        return f"TURBO ({cu_val} μ-lamports/CU)"
+    elif cu_val == DEX_CU_PRICE_MICRO_ULTRA:
+        return f"ULTRA ({cu_val} μ-lamports/CU)"
+    else:
+        return f"CUSTOM ({cu_val} μ-lamports/CU)"
+
+def _settings_keyboard():
+    """Return the settings menu keyboard."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 OFF", callback_data="set_cu:off"), 
+         InlineKeyboardButton("🟡 FAST", callback_data="set_cu:fast")],
+        [InlineKeyboardButton("🟠 TURBO", callback_data="set_cu:turbo"), 
+         InlineKeyboardButton("🔥 ULTRA", callback_data="set_cu:ultra")],
+        [InlineKeyboardButton("✏️ Custom", callback_data="set_cu:custom")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
+    ])
+
+async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the settings menu callback."""
+    q = update.callback_query
+    await q.answer()
+    
+    current = _tier_of(cu_price)
+    text = f"⚙️ <b>Settings</b>\n\n📊 Current Priority: <code>{current}</code>\n\nSelect priority level:"
+    
+    keyboard = [
+        [InlineKeyboardButton("🔴 OFF", callback_data="set_cu:off"), 
+         InlineKeyboardButton("🟡 FAST", callback_data="set_cu:fast")],
+        [InlineKeyboardButton("🟠 TURBO", callback_data="set_cu:turbo"), 
+         InlineKeyboardButton("🔥 ULTRA", callback_data="set_cu:ultra")],
+        [InlineKeyboardButton("✏️ Custom", callback_data="set_cu:custom")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
+    ]
+    
+    await q.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle priority tier selection."""
+    global cu_price
+    q = update.callback_query
+    await q.answer()
+    
+    choice = q.data.split(":", 1)[1]  # "set_cu:off" -> "off"
+    
+    if choice == "custom":
+        context.user_data["awaiting_custom_cu"] = True
+        await q.edit_message_text(
+            "✏️ Send a number for <b>computeUnitPriceMicroLamports</b>\n"
+            "Example: <code>2000</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_settings")]]),
+        )
+        return SET_CU_PRICE
+    elif choice == "off":
+        cu_price = None
+        note = "Priority fee set to OFF (0 μ-lamports/CU)."
+    elif choice == "fast":
+        cu_price = DEX_CU_PRICE_MICRO_FAST
+        note = f"FAST set to {cu_price} μ-lamports/CU."
+    elif choice == "turbo":
+        cu_price = DEX_CU_PRICE_MICRO_TURBO
+        note = f"TURBO set to {cu_price} μ-lamports/CU."
+    elif choice == "ultra":
+        cu_price = DEX_CU_PRICE_MICRO_ULTRA
+        note = f"ULTRA set to {cu_price} μ-lamports/CU."
+    else:
+        note = "Unknown option."
+
+    await q.edit_message_text(
+        f"✅ {note}\nCurrent: <code>{_tier_of(cu_price)}</code>",
+        parse_mode="HTML",
+        reply_markup=_settings_keyboard(),
+    )
+
+async def handle_custom_cu_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle custom CU price input."""
+    global cu_price
+    if not context.user_data.get("awaiting_custom_cu"):
+        return SET_CU_PRICE
+    
+    txt = (update.message.text or "").strip()
+    try:
+        # accept plain int; also support units like '2_000'
+        val = int(txt.replace("_", ""))
+        if val < 0 or val > 10_000_000:
+            raise ValueError("out_of_range")
+        cu_price = val if val > 0 else None
+        context.user_data.pop("awaiting_custom_cu", None)
+        await update.message.reply_html(
+            f"✅ Custom priority set to <code>{_tier_of(cu_price)}</code>.",
+            reply_markup=_settings_keyboard(),
+        )
+        return ConversationHandler.END
+    except Exception:
+        await update.message.reply_html(
+            "❌ Invalid number. Send an integer like <code>2500</code>.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_settings")]]),
+        )
+        return SET_CU_PRICE
+
 async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_user_context(context)
     query = update.callback_query
@@ -1745,6 +1883,7 @@ async def perform_trade(
                 private_key=wallet["private_key"],
                 **prep["params"],
                 priority_fee_sol=0.0,
+                compute_unit_price_micro_lamports=cu_price,
             )
 
         # handle sukses/gagal + update posisi
@@ -2077,6 +2216,19 @@ def main() -> None:
     # --- Copy wizard conversation ---
     application.add_handler(copy_conv_handler)
 
+    # --- CU Settings conversation ---
+    cu_settings_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(handle_set_priority_tier, pattern=r"^set_cu:custom$")],
+        states={
+            SET_CU_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_cu_input)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(handle_menu_settings, pattern="^menu_settings$"),
+            CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"),
+        ],
+    )
+    application.add_handler(cu_settings_conv_handler)
+
     # --- Copy menu & item actions (once only) ---
     application.add_handler(CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"))
     application.add_handler(CallbackQueryHandler(handle_copy_toggle, pattern=r"^copy_toggle:.+$"))
@@ -2096,10 +2248,15 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="^import_wallet$"))
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
+    # Settings handlers
+    application.add_handler(CallbackQueryHandler(handle_menu_settings, pattern=r"^menu_settings$"))
+    application.add_handler(CallbackQueryHandler(handle_set_priority_tier, pattern=r"^set_cu:(off|fast|turbo|ultra)$"))
+    
+    # Other dummy handlers
     application.add_handler(
         CallbackQueryHandler(
             dummy_response,
-            pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help|menu_settings)$",
+            pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help)$",
         )
     )
 

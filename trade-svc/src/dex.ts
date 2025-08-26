@@ -20,10 +20,10 @@ export type SwapParams = {
   amountLamports: number;   // ExactIn: inAmount (raw units) ; ExactOut: outAmount (raw units)
   dex?: 'jupiter' | 'raydium';
   slippageBps?: number;
-  priorityFee?: number;     // SOL → heuristik computeUnitPriceMicroLamports
+  priorityFee?: number;     // **SOL**, total tip target per tx (e.g. 0.00005)
   exactOut?: boolean;       // if true → swapMode=ExactOut
   forceLegacy?: boolean;    // if true → asLegacyTransaction
-  computeUnitPriceMicroLamports?: number; // override langsung
+  computeUnitPriceMicroLamports?: number; // override langsung (µ-lamports/CU)
 };
 
 const httpsAgent = new https.Agent({ keepAlive: true, family: 4, maxSockets: 50 });
@@ -191,10 +191,15 @@ export async function dexSwap(p: SwapParams): Promise<string> {
     amountRaw: amountLamports,
   });
 
-  // Heuristic compute price (micro lamports/CU) dari priorityFee (SOL) jika override tidak diberikan
+  // --- FIX: konversi priorityFee (SOL) → computeUnitPriceMicroLamports (µ-lamports/CU)
+  // Rumus benar: compute = (priorityFee_SOL * 1e9 lamports/SOL * 1e6 micro/lamport) / expectedCU
+  // Gunakan EXPECTED_CU (default 250k) agar tip per-CU realistis untuk Jupiter swap (~200k–300k CU)
+  const EXPECTED_CU = Number(process.env.EXPECTED_CU || '250000');
+  const computeFromSol = (pf: number) =>
+    Math.max(1, Math.floor((pf * 1_000_000_000 * 1_000_000) / Math.max(1, EXPECTED_CU)));
+
   const computeUnitPriceMicroLamports =
-    computeOverride ??
-    (priorityFee > 0 ? Math.max(1, Math.floor((priorityFee * 1_000_000_000) / 1_000_000)) : undefined);
+    computeOverride ?? (priorityFee > 0 ? computeFromSol(priorityFee) : undefined);
 
   // Retry 3x utk network/5xx/429
   let lastErr = '';

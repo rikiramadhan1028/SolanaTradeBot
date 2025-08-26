@@ -3,6 +3,7 @@ import json
 import base64
 import base58
 import httpx
+from typing import Any, Dict, Optional
 
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts, TokenAccountOpts
@@ -20,10 +21,8 @@ from spl.token.instructions import (
 )
 from spl.token.constants import TOKEN_PROGRAM_ID
 
-from dex_integrations.jupiter_aggregator import (
-    get_swap_route as jupiter_get_route,
-    get_swap_transaction as jupiter_get_tx,
-)
+# ===== Impor Telah Direvisi =====
+from dex_integrations.metis_jupiter import get_quote, build_swap_tx
 from dex_integrations.raydium_aggregator import (
     get_swap_quote as raydium_get_quote,
     get_swap_transaction as raydium_get_tx,
@@ -97,7 +96,7 @@ class SolanaClient:
         except Exception as e:
             raise ValueError(f"Invalid private key format: {e}")
 
-    # ---------- Jupiter/Raydium generic swap ----------
+    # ---------- Jupiter/Raydium generic swap (Telah Direvisi) ----------
     async def perform_swap(
         self,
         sender_private_key_json: str,
@@ -105,18 +104,35 @@ class SolanaClient:
         input_mint: str,
         output_mint: str,
         dex: str = "jupiter",
+        *, # Parameter di bawah ini harus diisi dengan nama (keyword-only)
+        slippage_bps: int = 50,
+        compute_unit_price_micro_lamports: Optional[int] = None,
+        as_legacy: bool = False,
     ) -> str:
         try:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
             if dex == "jupiter":
-                route = await jupiter_get_route(input_mint, output_mint, amount_lamports)
-                if not route:
-                    return "Error: No swap route found on Jupiter."
-                swap_transaction_b64 = await jupiter_get_tx(route, public_key_str)
+                # ===== Logika Baru Menggunakan Metis Jupiter =====
+                quote = await get_quote(
+                    input_mint=input_mint,
+                    output_mint=output_mint,
+                    amount=amount_lamports,
+                    slippage_bps=slippage_bps,
+                )
+                if not quote:
+                    return "Error: No swap quote found on Jupiter."
+                
+                swap_transaction_b64 = await build_swap_tx(
+                    quote_response=quote,
+                    user_public_key=public_key_str,
+                    compute_unit_price_micro_lamports=compute_unit_price_micro_lamports,
+                    as_legacy=as_legacy,
+                )
                 if not swap_transaction_b64:
                     return "Error: Could not build swap transaction on Jupiter."
+            
             elif dex == "raydium":
                 quote = await raydium_get_quote(input_mint, output_mint, amount_lamports)
                 if not quote:
@@ -127,9 +143,10 @@ class SolanaClient:
             else:
                 return "Error: Unsupported DEX."
 
+            # Alur signing, sending, dan confirming tetap sama
             raw_tx = base64.b64decode(swap_transaction_b64)
             unsigned = self._vtx_from_bytes(raw_tx)
-            tx = VersionedTransaction(unsigned.message, [keypair])  # sign by constructing
+            tx = VersionedTransaction(unsigned.message, [keypair])
 
             try:
                 resp = self.client.send_raw_transaction(
