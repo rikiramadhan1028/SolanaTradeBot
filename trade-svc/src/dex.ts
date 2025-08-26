@@ -20,7 +20,7 @@ export type SwapParams = {
   amountLamports: number;   // ExactIn: inAmount (raw units) ; ExactOut: outAmount (raw units)
   dex?: 'jupiter' | 'raydium';
   slippageBps?: number;
-  priorityFee?: number;     // **SOL**, total tip target per tx (e.g. 0.00005)
+  priorityFee?: number;     // **SOL**, total tip target per tx (e.g. 0.0001)
   exactOut?: boolean;       // if true → swapMode=ExactOut
   forceLegacy?: boolean;    // if true → asLegacyTransaction
   computeUnitPriceMicroLamports?: number; // override langsung (µ-lamports/CU)

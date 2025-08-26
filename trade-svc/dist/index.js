@@ -33,7 +33,7 @@ app.post('/dex/swap', async (req, res) => {
     }
 });
 app.post('/pumpfun/swap', async (req, res) => {
-    const { privateKey, action, mint, amount, useJito = false, bundleCount = 1, slippage = 10, priorityFee = 0.00005 } = req.body || {};
+    const { privateKey, action, mint, amount, useJito = false, bundleCount = 1, slippage = 10, priorityFee = 0.0001 } = req.body || {};
     if (!privateKey || !action || !mint || amount === undefined)
         return res.status(400).json({ error: 'missing fields' });
     const kp = keypairFromInput(privateKey);

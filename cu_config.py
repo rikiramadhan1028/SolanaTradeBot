@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Optional
 
 # SOL-based priority fee tiers (direct SOL amounts)
-PRIORITY_FEE_SOL_DEFAULT = float(os.getenv("PRIORITY_FEE_SOL_DEFAULT", "0.00005"))
+PRIORITY_FEE_SOL_DEFAULT = float(os.getenv("PRIORITY_FEE_SOL_DEFAULT", "0.0001"))
 PRIORITY_FEE_SOL_FAST = float(os.getenv("PRIORITY_FEE_SOL_FAST", "0.001"))     # 0.001 SOL
 PRIORITY_FEE_SOL_TURBO = float(os.getenv("PRIORITY_FEE_SOL_TURBO", "0.005"))   # 0.005 SOL  
 PRIORITY_FEE_SOL_ULTRA = float(os.getenv("PRIORITY_FEE_SOL_ULTRA", "0.01"))    # 0.01 SOL
@@ -50,6 +50,6 @@ def sol_to_cu_price(priority_fee_sol: float, estimated_cu: int = 200000) -> int:
 def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 200000) -> float:
     """Convert CU price (micro-lamports per CU) to SOL-based priority fee."""
     if cu_price_micro is None or cu_price_micro <= 0:
-        return 0.00005  # default fallback
+        return PRIORITY_FEE_SOL_DEFAULT  # use consistent default
     # Formula: (cu_price_micro * estimated_cu) / 1e9 = priority fee in SOL
-    return max(0.00001, (cu_price_micro * estimated_cu) / 1e9)
+    return max(PRIORITY_FEE_SOL_DEFAULT, (cu_price_micro * estimated_cu) / 1e9)
