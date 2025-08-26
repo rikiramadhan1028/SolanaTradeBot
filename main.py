@@ -11,25 +11,15 @@ from copy_trading import copytrading_loop
 from enum import Enum
 
 
-# Default per-CU (micro-lamports) — bisa dioverride ENV
-DEX_CU_PRICE_MICRO_DEFAULT = int(os.getenv("DEX_CU_PRICE_MICRO", "0"))
-DEX_CU_PRICE_MICRO_FAST = int(os.getenv("DEX_CU_PRICE_MICRO_FAST", "500"))
-DEX_CU_PRICE_MICRO_TURBO = int(os.getenv("DEX_CU_PRICE_MICRO_TURBO", "2000"))
-DEX_CU_PRICE_MICRO_ULTRA = int(os.getenv("DEX_CU_PRICE_MICRO_ULTRA", "10000"))
-
-class PriorityTier(str, Enum):
-    FAST = "fast"
-    TURBO = "turbo"
-    ULTRA = "ultra"
-
-def choose_cu_price(tier: Optional[str]) -> Optional[int]:
-    if not tier:
-        return DEX_CU_PRICE_MICRO_DEFAULT or None
-    t = str(tier).lower()
-    if t == PriorityTier.FAST: return DEX_CU_PRICE_MICRO_FAST
-    if t == PriorityTier.TURBO: return DEX_CU_PRICE_MICRO_TURBO
-    if t == PriorityTier.ULTRA: return DEX_CU_PRICE_MICRO_ULTRA
-    return DEX_CU_PRICE_MICRO_DEFAULT or None
+# Import CU price configuration
+from cu_config import (
+    choose_cu_price, 
+    DEX_CU_PRICE_MICRO_DEFAULT, 
+    DEX_CU_PRICE_MICRO_FAST, 
+    DEX_CU_PRICE_MICRO_TURBO, 
+    DEX_CU_PRICE_MICRO_ULTRA,
+    PriorityTier
+)
 
 cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
 
@@ -1365,6 +1355,10 @@ async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAU
     await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
     return AWAITING_TRADE_ACTION
 
+async def handle_back_to_token_panel_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Wrapper for back_to_token_panel that works outside conversations."""
+    await handle_back_to_token_panel(update, context)
+
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2122,6 +2116,10 @@ async def pumpfun_back_to_panel(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(panel_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return PUMPFUN_AWAITING_ACTION
 
+async def pumpfun_back_to_panel_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Wrapper for pumpfun_back_to_panel that works outside conversations."""
+    await pumpfun_back_to_panel(update, context)
+
 # ================== App bootstrap ==================
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
@@ -2238,6 +2236,10 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(trade_conv_handler)
     application.add_handler(pumpfun_conv_handler)
+
+    # --- Back button handlers (needed outside conversations) ---
+    application.add_handler(CallbackQueryHandler(handle_back_to_token_panel_outside_conv, pattern="^back_to_token_panel$"))
+    application.add_handler(CallbackQueryHandler(pumpfun_back_to_panel_outside_conv, pattern="^pumpfun_back_to_panel$"))
 
     # --- Other callback menus ---
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))

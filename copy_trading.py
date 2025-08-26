@@ -7,7 +7,7 @@ import httpx
 import database
 from typing import Optional
 from services.trade_service import dex_swap
-from main import choose_cu_price
+from cu_config import choose_cu_price
 
 
 from services.trade_service import dex_swap, svc_get_sol_balance, svc_get_mint_decimals, svc_get_token_balance

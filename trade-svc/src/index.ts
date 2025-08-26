@@ -36,10 +36,26 @@ const jupHeaders = HAS_JUP_KEY
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, family: 4 });
 
+// ---- Konfigurasi Priority Fee (Baru) ----
+let DEX_CU_PRICE_MICRO_DEFAULT = parseInt(process.env.DEX_CU_PRICE_MICRO || '0', 10);
+let DEX_CU_PRICE_MICRO_FAST    = parseInt(process.env.DEX_CU_PRICE_MICRO_FAST || '500', 10);
+let DEX_CU_PRICE_MICRO_TURBO   = parseInt(process.env.DEX_CU_PRICE_MICRO_TURBO || '2000', 10);
+let DEX_CU_PRICE_MICRO_ULTRA   = parseInt(process.env.DEX_CU_PRICE_MICRO_ULTRA || '10000', 10);
+
+function chooseCuPrice(tier?: string): number | undefined {
+  if (!tier) return DEX_CU_PRICE_MICRO_DEFAULT || undefined;
+  const t = String(tier).toLowerCase();
+  if (t === 'fast')  return DEX_CU_PRICE_MICRO_FAST;
+  if (t === 'turbo') return DEX_CU_PRICE_MICRO_TURBO;
+  if (t === 'ultra') return DEX_CU_PRICE_MICRO_ULTRA;
+  return DEX_CU_PRICE_MICRO_DEFAULT || undefined;
+}
+
 const app = express();
 app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 attachMetaRoutes(app);
+
 // ---------- Health & Diagnostics ----------
 app.get('/health', (_req: Request, res: Response) => res.json({ ok: true }));
 
@@ -55,7 +71,6 @@ app.get('/diag/ping', async (_req: Request, res: Response) => {
 
 app.get('/diag/jup', async (_req: Request, res: Response) => {
   try {
-    // cek keduanya
     const lite = await dns.lookup('lite-api.jup.ag', { all: true, verbatim: true });
     let pro: unknown = null;
     try { pro = await dns.lookup('api.jup.ag', { all: true, verbatim: true }); } catch {}
@@ -65,12 +80,6 @@ app.get('/diag/jup', async (_req: Request, res: Response) => {
   }
 });
 
-/**
- * GET /diag/quote?input=<mint>&output=<mint>&amount=<lamports>&direct=1
- * - direct=1/true -> onlyDirectRoutes=true (Raydium-direct)
- * - amount in lamports (integer > 0)
- * - sumber: Jupiter Swap API v1 (Pro/Lite fallback)
- */
 app.get('/diag/quote', async (req: Request, res: Response) => {
   try {
     const input = String(req.query.input || '').trim();
@@ -97,7 +106,6 @@ app.get('/diag/quote', async (req: Request, res: Response) => {
       swapMode: 'ExactIn',
     }).toString();
 
-    // Prefer Pro jika ada key, lalu fallback ke Lite (atau sebaliknya jika tanpa key)
     const bases = HAS_JUP_KEY ? [JUP_QUOTE_PRO, JUP_QUOTE_LITE] : [JUP_QUOTE_LITE, JUP_QUOTE_PRO];
     let lastStatus = 500;
     let lastBody: any = { error: 'quote_failed' };
@@ -128,6 +136,31 @@ app.get('/diag/quote', async (req: Request, res: Response) => {
   }
 });
 
+// ---------- Pengaturan Priority Fee (Baru) ----------
+app.get('/settings/priority', (_req, res) => {
+  res.json({
+    default: DEX_CU_PRICE_MICRO_DEFAULT,
+    tiers: {
+      fast: DEX_CU_PRICE_MICRO_FAST,
+      turbo: DEX_CU_PRICE_MICRO_TURBO,
+      ultra: DEX_CU_PRICE_MICRO_ULTRA,
+    },
+  });
+});
+
+app.post('/settings/priority', (req, res) => {
+  const { tier, value } = req.body || {};
+  if (typeof value === 'number' && value >= 0) {
+    if (tier === 'fast') { DEX_CU_PRICE_MICRO_FAST = value; return res.json({ fast: value }); }
+    if (tier === 'turbo') { DEX_CU_PRICE_MICRO_TURBO = value; return res.json({ turbo: value }); }
+    if (tier === 'ultra') { DEX_CU_PRICE_MICRO_ULTRA = value; return res.json({ ultra: value }); }
+    DEX_CU_PRICE_MICRO_DEFAULT = value;
+    return res.json({ default: value });
+  }
+  return res.status(400).json({ error: 'invalid tier/value' });
+});
+
+
 // ---------- Wallet helper ----------
 app.post('/derive-address', (req: Request, res: Response) => {
   try {
@@ -140,7 +173,7 @@ app.post('/derive-address', (req: Request, res: Response) => {
   }
 });
 
-// ---------- DEX swap (Jupiter / Raydium-direct via Jupiter) ----------
+// ---------- DEX swap (Handler Telah Direvisi Total) ----------
 app.post('/dex/swap', async (req: Request, res: Response) => {
   try {
     const {
@@ -148,35 +181,44 @@ app.post('/dex/swap', async (req: Request, res: Response) => {
       inputMint,
       outputMint,
       amountLamports,
-      dex = 'jupiter',
       slippageBps = 50,
-      priorityFee = 0,
+      exactOut = false,
+      forceLegacy = false,
+      // Opsi fee baru
+      computeUnitPriceMicroLamports,
+      priorityTier,
     } = req.body || {};
 
-    if (!privateKey || !inputMint || !outputMint || amountLamports === undefined) {
-      return res.status(400).json({ error: 'missing fields' });
+    if (!privateKey || !inputMint || !outputMint || !amountLamports) {
+      return res.status(400).json({ error: 'missing required fields: privateKey, inputMint, outputMint, amountLamports' });
     }
-    if (!Number.isFinite(Number(amountLamports)) || Number(amountLamports) <= 0) {
-      return res.status(400).json({ error: 'invalid amountLamports' });
-    }
+
+    // Logika untuk memilih priority fee: utamakan nilai eksplisit, fallback ke tier
+    const cuPrice = (typeof computeUnitPriceMicroLamports === 'number' && computeUnitPriceMicroLamports >= 0)
+      ? computeUnitPriceMicroLamports
+      : chooseCuPrice(priorityTier);
 
     const sig = await dexSwap({
       privateKey,
       inputMint: String(inputMint),
       outputMint: String(outputMint),
       amountLamports: Number(amountLamports),
-      dex: (String(dex) as 'jupiter' | 'raydium'),
       slippageBps: Number(slippageBps),
-      priorityFee: Number(priorityFee),
+      exactOut: !!exactOut,
+      forceLegacy: !!forceLegacy,
+      // Penting: teruskan fee per-CU yang sudah dihitung ke backend
+      computeUnitPriceMicroLamports: cuPrice,
+      priorityFee: 0, // Abaikan priorityFee lama untuk menghindari kebingungan
     });
 
     return res.json({ signature: sig });
   } catch (e: any) {
     const msg = String(e?.message || e);
-    console.error('[dex/swap]', msg);
+    console.error('[dex/swap]', msg, e);
     return res.status(500).json({ error: msg });
   }
 });
+
 
 // ---------- Pump.fun local trade (+ optional Jito bundle) ----------
 app.post('/pumpfun/swap', async (req: Request, res: Response) => {
@@ -189,6 +231,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
     bundleCount = 1,
     slippage = 10,
     priorityFee = 0.00005,
+    pool, // Tambahkan pool
   } = req.body || {};
 
   if (!privateKey || !action || !mint || amount === undefined) {
@@ -204,7 +247,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
     mint: String(mint),
     amount,
     jito: !!useJito,
-    request: { slippage, priorityFee, bundleCount, publicKey },
+    request: { slippage, priorityFee, bundleCount, publicKey, pool },
   });
 
   try {
@@ -217,7 +260,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
           amount,
           slippage: Number(slippage),
           priorityFee: i === 0 ? Number(priorityFee) : 0,
-          pool: 'auto',
+          pool: pool || 'auto',
         })),
       );
 
@@ -230,7 +273,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
         await sendBundleToJito(signedList);
       } catch (e: any) {
         const msg = String(e?.message || e).toLowerCase();
-        if (msg.includes('rate-limited')) {
+        if (msg.includes('rate-limited') || msg.includes('503')) {
           const txB64 = await tradeLocalSingle({
             publicKey,
             action: String(action).toLowerCase() as PumpAction,
@@ -238,7 +281,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
             amount,
             slippage: Number(slippage),
             priorityFee: Number(priorityFee),
-            pool: 'auto',
+            pool: pool || 'auto',
           });
           const tx = signFromBase64Unsigned(txB64, kp);
 
@@ -279,7 +322,7 @@ app.post('/pumpfun/swap', async (req: Request, res: Response) => {
       amount,
       slippage: Number(slippage),
       priorityFee: Number(priorityFee),
-      pool: 'auto',
+      pool: pool || 'auto',
     });
     const unsigned = signFromBase64Unsigned(txB64, kp);
 
@@ -330,7 +373,6 @@ app.get('/wallet/:addr/balance', async (req: Request, res: Response) => {
 app.get('/wallet/:addr/tokens', async (req: Request, res: Response) => {
   try {
     const rows = await getTokenBalances(cfg.rpcUrl, String(req.params.addr));
-    // opsional filter kosong
     const min = Number(req.query.min || '0');
     const filtered = rows.filter(r => r.amount > min);
     res.json({ tokens: filtered });
