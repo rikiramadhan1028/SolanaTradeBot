@@ -53,4 +53,6 @@ def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 20
         return PRIORITY_FEE_SOL_DEFAULT  # use consistent default
     # Formula: (cu_price_micro * estimated_cu) / 1e9 = priority fee in SOL
     # No caps - user has full control over custom values
-    return (cu_price_micro * estimated_cu) / 1e9
+    result = (cu_price_micro * estimated_cu) / 1e9
+    print(f"🔍 DEBUG cu_to_sol_priority_fee: {cu_price_micro} × {estimated_cu} ÷ 1e9 = {result}")
+    return result

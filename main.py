@@ -1785,6 +1785,14 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
     # Add small base transaction fee on top of priority fee
     buffer_ui += 0.001  # Base tx fee (5000 lamports) + ATA rent
     
+    # Debug: Print calculation details
+    print(f"🔍 DEBUG fee calculation:")
+    print(f"   - total_sol_to_spend: {total_sol_to_spend}")
+    print(f"   - priority_fee (buffer_ui before base): {buffer_ui - 0.001}")
+    print(f"   - base_fee: 0.001")
+    print(f"   - total_buffer_ui: {buffer_ui}")
+    print(f"   - total_needed: {total_sol_to_spend + buffer_ui}")
+    
     if sol_balance < total_sol_to_spend + buffer_ui:
         return {
             "status": "error",
