@@ -41,18 +41,29 @@ def choose_cu_price(tier: Optional[str]) -> Optional[int]:
     return DEX_CU_PRICE_MICRO_DEFAULT or None
 
 def sol_to_cu_price(priority_fee_sol: float, estimated_cu: int = 200000) -> int:
-    """Convert SOL priority fee to CU price (micro-lamports per CU)."""
+    """Convert SOL priority fee to CU price (micro-lamports per CU).
+    
+    Simplified calculation: 1 SOL = 5,000,000 micro-lamports/CU baseline
+    """
     if priority_fee_sol <= 0:
         return 0
-    # Formula: (priority_fee_sol * 1e9) / estimated_cu = cu_price_micro
-    return max(1, int((priority_fee_sol * 1e9) / estimated_cu))
+    # Simple baseline: 1 SOL = 5,000,000 micro-lamports/CU
+    # Formula: priority_fee_sol * 5,000,000 = cu_price_micro
+    BASELINE_CU_FOR_1_SOL = 5_000_000
+    return max(1, int(priority_fee_sol * BASELINE_CU_FOR_1_SOL))
 
 def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 200000) -> float:
-    """Convert CU price (micro-lamports per CU) to SOL-based priority fee."""
+    """Convert CU price (micro-lamports per CU) to SOL-based priority fee.
+    
+    Simplified calculation: 5,000,000 micro-lamports/CU = 1 SOL baseline
+    Other values scale proportionally from this baseline.
+    """
     if cu_price_micro is None or cu_price_micro <= 0:
         return PRIORITY_FEE_SOL_DEFAULT  # use consistent default
-    # Formula: (cu_price_micro * estimated_cu) / 1e9 = priority fee in SOL
-    # No caps - user has full control over custom values
-    result = (cu_price_micro * estimated_cu) / 1e9
-    print(f"🔍 DEBUG cu_to_sol_priority_fee: {cu_price_micro} × {estimated_cu} ÷ 1e9 = {result}")
+    
+    # Simple baseline: 5,000,000 micro-lamports/CU = 1 SOL
+    # Formula: (cu_price_micro / 5,000,000) = SOL priority fee
+    BASELINE_CU_FOR_1_SOL = 5_000_000
+    result = cu_price_micro / BASELINE_CU_FOR_1_SOL
+    print(f"🔍 DEBUG cu_to_sol_priority_fee: {cu_price_micro} ÷ {BASELINE_CU_FOR_1_SOL} = {result} SOL")
     return result
