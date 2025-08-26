@@ -9,7 +9,14 @@ from typing import Any, Dict, Optional
 
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts, TokenAccountOpts
-from .websocket_manager import SolanaWebSocketManager
+
+# Import websocket_manager with try/except for backward compatibility
+try:
+    from .websocket_manager import SolanaWebSocketManager
+    WEBSOCKET_AVAILABLE = True
+except ImportError as e:
+    print(f"WebSocket manager not available: {e}")
+    WEBSOCKET_AVAILABLE = False
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -57,6 +64,8 @@ class SolanaClient:
     
     async def _ensure_ws_connection(self) -> bool:
         """Ensure WebSocket connection is available"""
+        if not WEBSOCKET_AVAILABLE:
+            return False
         if not self.ws_manager:
             self.ws_manager = SolanaWebSocketManager(self.ws_url)
         return await self.ws_manager.connect()
@@ -64,7 +73,7 @@ class SolanaClient:
     async def _confirm_transaction_ws(self, signature: str, commitment: str = "confirmed", timeout: float = 60.0) -> bool:
         """Confirm transaction using WebSocket with fallback to polling"""
         try:
-            if not await self._ensure_ws_connection():
+            if not WEBSOCKET_AVAILABLE or not await self._ensure_ws_connection():
                 self.logger.warning("WebSocket unavailable, falling back to polling confirmation")
                 return self._confirm_transaction_polling(signature, commitment)
             
@@ -481,9 +490,9 @@ class SolanaClient:
         Shape: [{ "mint": str, "amount": float_ui, "decimals": int }, ...]
         """
         try:
-            owner = Pubkey(owner_address)
+            owner = Pubkey.from_string(owner_address)
         except Exception as e:
-            print(f"[get_spl_token_balances] invalid owner: {e}")
+            self.logger.debug(f"[get_spl_token_balances] invalid owner: {e}")
             return []
 
         out = []
