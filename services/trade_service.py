@@ -2,6 +2,7 @@
 import os
 import httpx
 from typing import Any, Dict, Optional
+from cu_config import cu_to_sol_priority_fee
 
 # ---- Base URL normalizer ----
 _raw = os.getenv("TRADE_SVC_URL", "http://localhost:8080").strip().rstrip("/")
@@ -100,6 +101,7 @@ async def pumpfun_swap(
     use_jito: bool = False,
     slippage: Optional[int] = None,
     priority_fee: float = 0.00005,
+    compute_unit_price_micro_lamports: Optional[int] = None,
 ) -> Dict[str, Any]:
     act = (action or "").lower().strip()
     if denominated_in_sol is None:
@@ -119,12 +121,17 @@ async def pumpfun_swap(
     except Exception:
         public_key = ""
 
+    # Calculate priority fee from CU if provided
+    final_priority_fee = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
+    if compute_unit_price_micro_lamports is None:
+        final_priority_fee = priority_fee  # fallback to original parameter
+
     payload = {
         "privateKey": private_key, "useJito": bool(use_jito),
         "publicKey": public_key, "action": act, "mint": mint,
         "amount": send_amount,
         "denominatedInSol": "true" if denominated_in_sol else "false",
-        "slippage": slip_pct, "priorityFee": float(priority_fee),
+        "slippage": slip_pct, "priorityFee": float(final_priority_fee),
         "pool": (pool or PUMPFUN_DEFAULT_POOL),
     }
     return await _request("POST", "/pumpfun/swap", json=payload)

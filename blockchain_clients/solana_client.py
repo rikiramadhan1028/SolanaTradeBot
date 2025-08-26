@@ -22,6 +22,7 @@ from spl.token.instructions import (
 from spl.token.constants import TOKEN_PROGRAM_ID
 
 # ===== Impor Telah Direvisi =====
+from cu_config import cu_to_sol_priority_fee
 from dex_integrations.metis_jupiter import get_quote, build_swap_tx
 from dex_integrations.raydium_aggregator import (
     get_swap_quote as raydium_get_quote,
@@ -169,19 +170,23 @@ class SolanaClient:
 
     # ---------- Pumpfun local signing ----------
     async def perform_pumpfun_swap(
-        self, sender_private_key_json: str, amount, action: str, mint: str
+        self, sender_private_key_json: str, amount, action: str, mint: str, 
+        *, compute_unit_price_micro_lamports: Optional[int] = None
     ) -> str:
         try:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
+            # Convert CU price to SOL-based priority fee if needed
+            priority_fee = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
+            
             tx_b64 = await get_pumpfun_swap_transaction(
                 public_key_str,
                 action,
                 mint,
                 amount,
                 slippage=10,
-                priority_fee=0.00005,
+                priority_fee=priority_fee,
                 pool="auto",
             )
             if not tx_b64:
@@ -231,6 +236,7 @@ class SolanaClient:
         mint: str,
         *,
         bundle_count: int = 1,
+        compute_unit_price_micro_lamports: Optional[int] = None,
     ) -> str:
         """Build bundle via trade-local (array), sign locally, kirim ke Jito; auto-fallback ke local bila rate limited."""
         try:
@@ -239,13 +245,16 @@ class SolanaClient:
             keypair = self._get_keypair_from_private_key(sender_private_key_json)
             public_key_str = str(keypair.pubkey())
 
+            # Convert CU price to SOL-based priority fee if needed
+            priority_fee = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 300000)
+
             unsigned_base58_list = await get_pumpfun_bundle_unsigned_base58(
                 [public_key_str] * bundle_count,
                 [action] * bundle_count,
                 [mint] * bundle_count,
                 [amount] * bundle_count,
                 slippage=10,
-                priority_fee=0.0001,
+                priority_fee=priority_fee,
                 pool="auto",
             )
             if not unsigned_base58_list:
@@ -270,17 +279,17 @@ class SolanaClient:
                 async with httpx.AsyncClient(timeout=20.0) as client:
                     jr = await client.post(JITO_BUNDLE_ENDPOINT, json=payload)
                     if jr.status_code == 429:
-                        fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
+                        fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint, compute_unit_price_micro_lamports=compute_unit_price_micro_lamports)
                         return fb if not fb.startswith("Error") else f"Error: Jito rate-limited (429). Fallback failed: {fb}"
                     jr.raise_for_status()
             except httpx.HTTPStatusError as e:
                 body = e.response.text
                 if e.response.status_code in (429, 503) or "rate limited" in body.lower():
-                    fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
+                    fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint, compute_unit_price_micro_lamports=compute_unit_price_micro_lamports)
                     return fb if not fb.startswith("Error") else f"Error: Jito rate-limited. Fallback failed: {fb}"
                 return f"Error: Jito sendBundle failed {e.response.status_code}: {body}"
             except Exception as e:
-                fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint)
+                fb = await self.perform_pumpfun_swap(sender_private_key_json, amount, action, mint, compute_unit_price_micro_lamports=compute_unit_price_micro_lamports)
                 return fb if not fb.startswith("Error") else f"Error: Jito error '{self._format_exc(e)}'. Fallback failed: {fb}"
 
             return signatures[0] if signatures else "OK"

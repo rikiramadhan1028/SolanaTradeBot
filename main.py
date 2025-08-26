@@ -14,6 +14,7 @@ from enum import Enum
 # Import CU price configuration
 from cu_config import (
     choose_cu_price, 
+    cu_to_sol_priority_fee,
     DEX_CU_PRICE_MICRO_DEFAULT, 
     DEX_CU_PRICE_MICRO_FAST, 
     DEX_CU_PRICE_MICRO_TURBO, 
@@ -1868,8 +1869,8 @@ async def perform_trade(
                 mint=token_mint,
                 amount=amt_param,
                 denominated_in_sol=denom_sol,
-                slippage_pct=slip_pct,
-                priority_fee_sol=0.0,
+                slippage_bps=slip_pct * 100,  # convert percentage to basis points
+                compute_unit_price_micro_lamports=cu_price,
                 pool="auto",
             )
         else:

@@ -23,3 +23,10 @@ def choose_cu_price(tier: Optional[str]) -> Optional[int]:
     if t == PriorityTier.TURBO: return DEX_CU_PRICE_MICRO_TURBO
     if t == PriorityTier.ULTRA: return DEX_CU_PRICE_MICRO_ULTRA
     return DEX_CU_PRICE_MICRO_DEFAULT or None
+
+def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 200000) -> float:
+    """Convert CU price (micro-lamports per CU) to SOL-based priority fee."""
+    if cu_price_micro is None or cu_price_micro <= 0:
+        return 0.00005  # default fallback
+    # Formula: (cu_price_micro * estimated_cu) / 1e9 = priority fee in SOL
+    return max(0.00001, (cu_price_micro * estimated_cu) / 1e9)

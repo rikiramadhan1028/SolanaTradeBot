@@ -2,6 +2,8 @@
 import base64
 from typing import Union, Optional, List
 import httpx
+import os
+from cu_config import choose_cu_price, cu_to_sol_priority_fee
 
 PUMPPORTAL_TRADE_LOCAL = "https://pumpportal.fun/api/trade-local"
 
@@ -27,7 +29,7 @@ async def get_pumpfun_swap_transaction(
     amount: Union[float, str],
     *,
     slippage: int = 10,
-    priority_fee: float = 0.00001,
+    priority_fee: Optional[float] = None,
     pool: Optional[str] = "auto",
 ) -> Optional[str]:
     """
@@ -41,6 +43,11 @@ async def get_pumpfun_swap_transaction(
     amt = _normalize_amount(amount)
     # WHY: BUY → denominatedInSol True; SELL persen → False (token-denominated)
     denom_sol = (act == "buy") and not _is_percent(amt)
+
+    # Use CU configuration if no priority fee is provided
+    if priority_fee is None:
+        cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
+        priority_fee = cu_to_sol_priority_fee(cu_price, 200000)
 
     payload = {
         "publicKey": public_key,
@@ -85,7 +92,7 @@ async def get_pumpfun_bundle_unsigned_base58(
     amounts: List[Union[float, str]],
     *,
     slippage: int = 10,
-    priority_fee: float = 0.00005,
+    priority_fee: Optional[float] = None,
     pool: Optional[str] = "auto",
 ) -> Optional[List[str]]:
     """
@@ -95,6 +102,11 @@ async def get_pumpfun_bundle_unsigned_base58(
     n = len(public_keys)
     if not (len(actions) == len(mints) == len(amounts) == n):
         raise ValueError("arrays must have the same length")
+
+    # Use CU configuration if no priority fee is provided
+    if priority_fee is None:
+        cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
+        priority_fee = cu_to_sol_priority_fee(cu_price, 300000)  # Higher estimate for bundles
 
     body = []
     for i in range(n):
