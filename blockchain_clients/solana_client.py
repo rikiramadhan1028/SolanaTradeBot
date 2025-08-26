@@ -48,11 +48,26 @@ JITO_BUNDLE_ENDPOINT = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 
 class SolanaClient:
     def __init__(self, rpc_url: str):
-        self.client = Client(rpc_url)
-        self.rpc_url = rpc_url
         self.logger = logging.getLogger(__name__)  # Initialize logger first
-        self.ws_url = self._get_ws_url(rpc_url)
+        
+        # Fix RPC URL if WebSocket URL was provided by mistake
+        self.rpc_url = self._fix_rpc_url(rpc_url)
+        
+        self.client = Client(self.rpc_url)
+        self.ws_url = self._get_ws_url(self.rpc_url)
         self.ws_manager = None
+    
+    def _fix_rpc_url(self, rpc_url: str) -> str:
+        """Convert WebSocket URL to HTTP URL if needed"""
+        if rpc_url.startswith("wss://"):
+            fixed_url = rpc_url.replace("wss://", "https://")
+            self.logger.warning(f"WebSocket URL provided as RPC URL. Converting to HTTP: {fixed_url}")
+            return fixed_url
+        elif rpc_url.startswith("ws://"):
+            fixed_url = rpc_url.replace("ws://", "http://")
+            self.logger.warning(f"WebSocket URL provided as RPC URL. Converting to HTTP: {fixed_url}")
+            return fixed_url
+        return rpc_url
     
     def _get_ws_url(self, rpc_url: str) -> str:
         """Convert HTTP RPC URL to WebSocket URL with provider-specific handling"""
