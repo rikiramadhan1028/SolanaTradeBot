@@ -15,6 +15,8 @@ node_modules/
 .venv/
 .idea/
 .vscode/
+.claude/
+claude/
 
 # ⛔ OS files
 .DS_Store

@@ -1753,7 +1753,7 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
         return None
 
 
-async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int) -> dict:
+async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int, user_id: str = None) -> dict:
     """Prepares parameters for a buy trade, checking balance and handling pre-swap fees."""
     total_sol_to_spend = float(amount)
     fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
@@ -1764,7 +1764,27 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
     except Exception:
         sol_balance = 0.0
 
-    buffer_ui = 0.002  # Gas fees buffer
+    # Calculate actual priority fee buffer based on user settings
+    if user_id:
+        user_priority_tier = get_user_priority_tier(user_id)
+        if user_priority_tier:
+            from cu_config import choose_priority_fee_sol
+            buffer_ui = choose_priority_fee_sol(user_priority_tier)
+        else:
+            user_cu_price = get_user_cu_price(user_id)
+            if user_cu_price > 0:
+                from cu_config import cu_to_sol_priority_fee
+                buffer_ui = cu_to_sol_priority_fee(user_cu_price, 200000)
+            else:
+                from cu_config import PRIORITY_FEE_SOL_DEFAULT
+                buffer_ui = PRIORITY_FEE_SOL_DEFAULT
+    else:
+        from cu_config import PRIORITY_FEE_SOL_DEFAULT
+        buffer_ui = PRIORITY_FEE_SOL_DEFAULT
+    
+    # Add small base transaction fee on top of priority fee
+    buffer_ui += 0.001  # Base tx fee (5000 lamports) + ATA rent
+    
     if sol_balance < total_sol_to_spend + buffer_ui:
         return {
             "status": "error",
@@ -1944,7 +1964,7 @@ async def perform_trade(
 
     # siapkan parameter
     if trade_type == "buy":
-        prep = await _prepare_buy_trade(wallet, amount, token_mint, buy_slip_bps)
+        prep = await _prepare_buy_trade(wallet, amount, token_mint, buy_slip_bps, str(user_id))
     else:
         prep = await _prepare_sell_trade(wallet, amount, amount_type, token_mint, sel_slip_bps)
         if isinstance(prep, dict) and prep.get("pre_sol_ui") is not None:
