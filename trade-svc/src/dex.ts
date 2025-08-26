@@ -11,6 +11,7 @@ import {
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { cfg } from './config.js';
 import { conn, signFromBase64Unsigned, sendSignedVersionedTx } from './solana.js';
+import { getQuote as metisGetQuote, buildSwapTx as metisBuildSwapTx } from './metis-jupiter.js';
 
 export type SwapParams = {
   privateKey: string;
@@ -27,14 +28,8 @@ export type SwapParams = {
 
 const httpsAgent = new https.Agent({ keepAlive: true, family: 4, maxSockets: 50 });
 
-// Jupiter Swap API v1 (Pro/Lite)
-const JUP_PRO  = 'https://api.jup.ag/swap/v1';
-const JUP_LITE = 'https://lite-api.jup.ag/swap/v1';
-const HAS_KEY  = !!process.env.JUP_API_KEY;
-
 function apiHeaders() {
-  return HAS_KEY ? { 'X-API-KEY': String(process.env.JUP_API_KEY), 'User-Agent': 'trade-svc/1.0' }
-                 : { 'User-Agent': 'trade-svc/1.0' };
+  return { 'User-Agent': 'trade-svc/1.0' };
 }
 
 function keyBytes(input: string): Uint8Array {
@@ -61,41 +56,39 @@ function mapAxiosErr(e: unknown): string {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// ---------- Helpers: Jupiter v1 ----------
+// ---------- Helpers: Jupiter (via Metis/Pro/Lite/Public fallback) ----------
 async function getQuote(params: URLSearchParams) {
-  const bases = HAS_KEY ? [JUP_PRO, JUP_LITE] : [JUP_LITE, JUP_PRO];
-  let lastErr = '';
-  for (const base of bases) {
-    try {
-      const url = `${base}/quote?${params.toString()}`;
-      const r = await axios.get(url, {
-        httpsAgent, timeout: 12000, validateStatus: () => true, headers: apiHeaders(),
-      });
-      if (r.status === 200 && r.data?.routePlan) return r.data;
-      lastErr = `quote ${r.status} ${JSON.stringify(r.data).slice(0,300)}`;
-    } catch (e) {
-      lastErr = mapAxiosErr(e);
-    }
-  }
-  throw new Error(lastErr || 'quote_failed');
+  const p = Object.fromEntries(params.entries());
+  return metisGetQuote({
+    inputMint: String(p.inputMint),
+    outputMint: String(p.outputMint),
+    amountRaw: Number(p.amount),
+    slippageBps: p.slippageBps ? Number(p.slippageBps) : undefined,
+    swapMode: p.swapMode as 'ExactIn' | 'ExactOut' | undefined,
+    asLegacyTransaction: String(p.asLegacyTransaction) === 'true',
+    dynamicSlippage: String(p.dynamicSlippage) === 'true',
+    extra: p, // include any extra flags like onlyDirectRoutes/restrictIntermediateTokens
+  });
 }
 
 async function buildSwapTx(body: any) {
-  const bases = HAS_KEY ? [JUP_PRO, JUP_LITE] : [JUP_LITE, JUP_PRO];
-  let lastErr = '';
-  for (const base of bases) {
-    try {
-      const r = await axios.post(`${base}/swap`, body, {
-        httpsAgent, timeout: 15000, validateStatus: () => true,
-        headers: { 'Content-Type': 'application/json', ...apiHeaders() },
-      });
-      if (r.status === 200 && r.data?.swapTransaction) return r.data.swapTransaction as string;
-      lastErr = `swap build ${r.status} ${JSON.stringify(r.data).slice(0,300)}`;
-    } catch (e) {
-      lastErr = mapAxiosErr(e);
-    }
-  }
-  throw new Error(lastErr || 'swap_build_failed');
+  const known = new Set([
+    'quoteResponse','userPublicKey','wrapAndUnwrapSol','dynamicComputeUnitLimit','computeUnitPriceMicroLamports','asLegacyTransaction','destinationTokenAccount','feeAccount','dynamicSlippage'
+  ]);
+  const extra: Record<string, any> = {};
+  for (const [k, v] of Object.entries(body)) if (!known.has(k)) extra[k] = v;
+  return metisBuildSwapTx({
+    userPublicKey: String(body.userPublicKey),
+    quote: body.quoteResponse,
+    wrapAndUnwrapSol: body.wrapAndUnwrapSol !== false,
+    dynamicComputeUnitLimit: body.dynamicComputeUnitLimit !== false,
+    computeUnitPriceMicroLamports: body.computeUnitPriceMicroLamports,
+    asLegacyTransaction: !!body.asLegacyTransaction,
+    destinationTokenAccount: body.destinationTokenAccount,
+    feeAccount: body.feeAccount,
+    dynamicSlippage: body.dynamicSlippage,
+    extra,
+  });
 }
 
 // ---------- Pre-checks untuk error "Attempt to debit..." ----------
@@ -207,15 +200,15 @@ export async function dexSwap(p: SwapParams): Promise<string> {
   let lastErr = '';
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // 1) Quote
+      // 1) Quote (pass through flags so router can constrain route set)
       const qs = new URLSearchParams({
         inputMint,
         outputMint,
         amount: String(amountLamports),
         slippageBps: String(slippageBps),
+        swapMode, // 'ExactIn' | 'ExactOut'
         onlyDirectRoutes: String(onlyDirectRoutes),
         restrictIntermediateTokens: 'true',
-        swapMode, // 'ExactIn' | 'ExactOut'
       });
       const quote = await getQuote(qs);
 
