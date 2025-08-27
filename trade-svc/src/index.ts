@@ -36,11 +36,11 @@ const jupHeaders = HAS_JUP_KEY
 
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, family: 4 });
 
-// ---- Konfigurasi Priority Fee (Baru) ----
+// ---- Konfigurasi Priority Fee (Updated to match Python defaults) ----
 let DEX_CU_PRICE_MICRO_DEFAULT = parseInt(process.env.DEX_CU_PRICE_MICRO || '0', 10);
-let DEX_CU_PRICE_MICRO_FAST    = parseInt(process.env.DEX_CU_PRICE_MICRO_FAST || '500', 10);
-let DEX_CU_PRICE_MICRO_TURBO   = parseInt(process.env.DEX_CU_PRICE_MICRO_TURBO || '2000', 10);
-let DEX_CU_PRICE_MICRO_ULTRA   = parseInt(process.env.DEX_CU_PRICE_MICRO_ULTRA || '10000', 10);
+let DEX_CU_PRICE_MICRO_FAST    = parseInt(process.env.DEX_CU_PRICE_MICRO_FAST || '5000', 10);    // 0.001 SOL
+let DEX_CU_PRICE_MICRO_TURBO   = parseInt(process.env.DEX_CU_PRICE_MICRO_TURBO || '25000', 10);  // 0.005 SOL  
+let DEX_CU_PRICE_MICRO_ULTRA   = parseInt(process.env.DEX_CU_PRICE_MICRO_ULTRA || '50000', 10);  // 0.01 SOL
 
 function chooseCuPrice(tier?: string): number | undefined {
   if (!tier) return DEX_CU_PRICE_MICRO_DEFAULT || undefined;

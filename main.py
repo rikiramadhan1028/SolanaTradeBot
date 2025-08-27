@@ -1463,26 +1463,31 @@ async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- CU Settings UI Functions ---
 def _tier_of(cu_val: Optional[int]) -> str:
     """Return a display string for the current CU price with SOL and lamports values."""
-    from cu_config import cu_to_sol_priority_fee
+    from cu_config import cu_to_sol_priority_fee, DEX_CU_PRICE_MICRO_FAST, DEX_CU_PRICE_MICRO_TURBO, DEX_CU_PRICE_MICRO_ULTRA
     
     if cu_val is None or cu_val == 0:
         return "OFF (0 SOL)"
-    elif cu_val == DEX_CU_PRICE_MICRO_FAST:
-        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
-        lamports = int(sol_fee * 1_000_000_000)
+    
+    # Use current environment values for comparison
+    current_fast = DEX_CU_PRICE_MICRO_FAST
+    current_turbo = DEX_CU_PRICE_MICRO_TURBO  
+    current_ultra = DEX_CU_PRICE_MICRO_ULTRA
+    
+    sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
+    lamports = int(sol_fee * 1_000_000_000)
+    
+    if cu_val == current_fast:
         return f"FAST ({sol_fee:.3f} SOL = {lamports:,} lamports)"
-    elif cu_val == DEX_CU_PRICE_MICRO_TURBO:
-        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
-        lamports = int(sol_fee * 1_000_000_000)
+    elif cu_val == current_turbo:
         return f"TURBO ({sol_fee:.3f} SOL = {lamports:,} lamports)"
-    elif cu_val == DEX_CU_PRICE_MICRO_ULTRA:
-        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
-        lamports = int(sol_fee * 1_000_000_000)
+    elif cu_val == current_ultra:
         return f"ULTRA ({sol_fee:.3f} SOL = {lamports:,} lamports)"
     else:
-        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
-        lamports = int(sol_fee * 1_000_000_000)
-        return f"CUSTOM ({sol_fee:.3f} SOL = {lamports:,} lamports)"
+        # Add warning for excessive custom values
+        if cu_val >= 250000:  # Safety cap threshold
+            return f"CUSTOM ({sol_fee:.3f} SOL = {lamports:,} lamports) ⚠️ CAPPED"
+        else:
+            return f"CUSTOM ({sol_fee:.3f} SOL = {lamports:,} lamports)"
 
 def _settings_keyboard():
     """Return the settings menu keyboard."""
