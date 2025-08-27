@@ -428,6 +428,23 @@ def format_pct(x: float | None) -> str:
     except Exception:
         return "—"
 
+def get_pnl_image_url(pnl_pct: float) -> str:
+    """Returns image URL based on PnL percentage for modern CEX-like sharing"""
+    if pnl_pct >= 1.0:  # +100% or more
+        return "https://example.com/images/pnl_100plus.png"  # Replace with actual URL
+    elif pnl_pct >= 0.5:  # +50% to +99.99%
+        return "https://example.com/images/pnl_50plus.png"   # Replace with actual URL
+    elif pnl_pct >= 0.25:  # +25% to +49.99%
+        return "https://example.com/images/pnl_25plus.png"   # Replace with actual URL
+    elif pnl_pct >= 0.0:   # 0% to +24.99%
+        return "https://example.com/images/pnl_positive.png" # Replace with actual URL
+    elif pnl_pct >= -0.25:  # -25% to -0.01%
+        return "https://example.com/images/pnl_negative.png" # Replace with actual URL
+    elif pnl_pct >= -0.5:   # -50% to -25.01%
+        return "https://example.com/images/pnl_minus25.png"  # Replace with actual URL
+    else:  # -50% or worse
+        return "https://example.com/images/pnl_minus50.png"  # Replace with actual URL
+
 def _sol_from_usd(usd: float, sol_price: float) -> float:
     try:
         if sol_price <= 0: return 0.0
@@ -892,13 +909,40 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     start = (page-1)*ASSETS_PAGE_SIZE
     page_items = filtered[start:start+ASSETS_PAGE_SIZE]
 
-    # header
+    # Calculate portfolio stats for modern CEX-like interface
+    total_positions = len(filtered)
+    profitable_positions = sum(1 for x in filtered if x.get("pos", {}).get("avg_entry_price_usd") and x["price_usd"] > x["pos"].get("avg_entry_price_usd", 0))
+    total_pnl_usd = 0
+    total_cost_usd = 0
+    
+    for x in filtered:
+        pos = x.get("pos", {})
+        if pos and x["price_usd"] > 0:
+            avg_px = pos.get("avg_entry_price_usd")
+            if isinstance(avg_px, (int, float)) and avg_px > 0:
+                cost_usd = x["amount"] * avg_px
+                current_usd = x["amount"] * x["price_usd"]
+                total_pnl_usd += (current_usd - cost_usd)
+                total_cost_usd += cost_usd
+    
+    portfolio_pnl_pct = (total_pnl_usd / total_cost_usd) if total_cost_usd > 0 else None
+    win_rate = (profitable_positions / total_positions * 100) if total_positions > 0 else 0
+    
+    # Modern portfolio header
     lines = []
-    lines.append("📊 <b>Your Asset Balances</b>\n")
-    lines.append(f"👛 <code>{addr}</code>")
-    lines.append(f"• SOL: <code>{sol_amount:.6f} SOL</code> ({format_usd(sol_usd)})  @ {format_usd(sol_price)}")
-    lines.append(f"• Tokens value: <b>{format_usd(tokens_total_usd)}</b>")
-    lines.append(f"• <b>Total Portfolio:</b> <b>{format_usd(total_usd)}</b>\n")
+    lines.append("💼 <b>Portfolio Overview</b>")
+    lines.append("─────────────────────")
+    lines.append(f"🏦 <b>Total Value:</b> {format_usd(total_usd)}")
+    
+    if portfolio_pnl_pct is not None:
+        pnl_emoji = "🟢" if portfolio_pnl_pct >= 0 else "🔴"
+        lines.append(f"📊 <b>Total PnL:</b> {pnl_emoji} {format_pct(portfolio_pnl_pct)} ({format_usd(total_pnl_usd)})")
+    
+    lines.append(f"🎯 <b>Positions:</b> {total_positions} | Win Rate: {win_rate:.1f}%")
+    lines.append(f"💰 <b>SOL:</b> {sol_amount:.3f} ({format_usd(sol_usd)})")
+    lines.append(f"🪙 <b>Tokens:</b> {format_usd(tokens_total_usd)}")
+    lines.append(f"👛 <code>{addr[:4]}...{addr[-4:]}</code>")
+    lines.append("─────────────────────\n")
 
     # token cards
     if not page_items:
@@ -923,15 +967,15 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         indicator = "📈" if (pnl_pct is not None and pnl_pct >= 0) else ("📉" if pnl_pct is not None else "📊")
         danger = "🟩" if (pnl_pct is not None and pnl_pct >= 0) else ("🟥" if pnl_pct is not None else "")
 
-        lines.append(f"<b>${sym}</b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
-                     f"[<a href='tg://callback?component=hide'>Hide</a>]")  # label saja, tombol real di bawah
-        lines.append(f"<code>{mint}</code>(Tap to copy)")
+        lines.append(f"<b><a href='tg://callback?data=trade_{mint}'>${sym}</a></b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
+                     f"[<a href='tg://callback?data=assets_hide_{mint}'>hide</a>]")  # label saja, tombol real di bawah
+        lines.append(f"<code>{mint}</code>")
         if pnl_pct is not None:
             lines.append(f"• PNL: {format_pct(pnl_pct)} "
                          f"({(pnl_sol or 0):.3f} SOL/{format_usd((pnl_sol or 0)*sol_price)}) {danger}")
         else:
             lines.append("• PNL: —")
-        lines.append("[Share]")
+        lines.append(f"[<a href='tg://callback?data=assets_share_pnl_{mint}'>Share PNL</a>]")
         avg_mc = pos.get("avg_entry_mc_usd")
         avg_px = pos.get("avg_entry_price_usd")
         lines.append(f"• Avg Entry: {format_usd(avg_px or 0)}  Avg Entry MC: {format_usd(avg_mc or 0)}")
@@ -959,20 +1003,18 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         InlineKeyboardButton(f"{sort_label}", callback_data=f"assets_sort_{sort_next}"),
         InlineKeyboardButton(("Hide Dust" if not hide_dust else "Show All"),callback_data="assets_toggle_dust"),
     ]
+    row1_5 = [
+        InlineKeyboardButton("📸 Share Portfolio", callback_data="assets_share_portfolio"),
+    ]
     row2 = [b for b in (prev_btn, InlineKeyboardButton("↻ Refresh", callback_data="assets_refresh"), next_btn) if b]
     # baris tombol contextual per kartu tidak bisa inline per baris di teks HTML,
     # jadi kita sediakan “Hide / Share” via callback per-mint di bawah sebagai baris tambahan:
+    # Remove individual card buttons since we now use inline links
     card_buttons = []
-    for x in page_items:
-        mint = x["mint"]
-        card_buttons.append([
-            InlineKeyboardButton(f"🔕 Hide {x['symbol']}", callback_data=f"assets_hide_{mint}"),
-            InlineKeyboardButton("🔗 Share", callback_data=f"assets_share_{mint}"),
-        ])
 
     back = [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
 
-    kb_rows = [row0, row1]
+    kb_rows = [row0, row1, row1_5]
     if row2: kb_rows.append(row2)
     kb_rows += card_buttons
     kb_rows.append(back)
@@ -1021,6 +1063,22 @@ async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_
         hidden.add(mint)
         st["hidden_mints"] = hidden
 
+    elif data.startswith("assets_share_pnl_"):
+        mint = data.split("_", 3)[3]
+        await handle_share_portfolio_pnl(q, context, mint)
+        return  # Don't re-render assets view
+        
+    elif data == "assets_share_portfolio":
+        await handle_share_full_portfolio(q, context)
+        return  # Don't re-render assets view
+        
+    elif data.startswith("trade_"):
+        mint = data.split("_", 1)[1]
+        # Navigate to trade screen for this token
+        context.user_data["trade_mint"] = mint
+        await handle_trade(q, context)
+        return  # Don't re-render assets view
+        
     elif data.startswith("assets_share_"):
         mint = data.split("_", 2)[2]
         # kirim share card terpisah
@@ -1031,6 +1089,166 @@ async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_
             pass
 
     await _render_assets_detailed_view(q, context)
+
+async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint: str):
+    """Share PnL with modern CEX-like image based on performance"""
+    user_id = q.from_user.id
+    w = database.get_user_wallet(user_id)
+    addr = (w or {}).get("address")
+    
+    if not addr:
+        await q.message.reply_text("❌ No wallet found")
+        return
+    
+    try:
+        # Get token data for this specific mint
+        meta = await MetaCache.get(mint)
+        pack = await DexCache.get(mint, prefer_cache=True)
+        pos = database.position_get(user_id, mint) or {}
+        
+        symbol = (meta.get("symbol") or "").strip() or mint[:6].upper()
+        price = float(pack.get("price") or 0.0)
+        
+        # Calculate PnL
+        pnl_pct = None
+        pnl_usd = 0
+        if pos and price > 0:
+            avg_px = pos.get("avg_entry_price_usd")
+            if isinstance(avg_px, (int, float)) and avg_px > 0:
+                # Get current balance
+                tokens = await svc_get_token_balances(addr, min_amount=0.0)
+                current_amount = 0
+                for t in tokens:
+                    if (t.get("mint") or t.get("mintAddress")) == mint:
+                        current_amount = float(t.get("amount") or t.get("uiAmount") or 0)
+                        break
+                
+                if current_amount > 0:
+                    cost_usd = current_amount * avg_px
+                    current_usd = current_amount * price
+                    pnl_usd = current_usd - cost_usd
+                    pnl_pct = (pnl_usd / cost_usd) if cost_usd > 0 else 0
+        
+        if pnl_pct is not None:
+            # Get appropriate image for PnL level
+            image_url = get_pnl_image_url(pnl_pct)
+            
+            # Create shareable message with image
+            pnl_text = f"{pnl_pct*100:+.1f}%" if pnl_pct else "0.0%"
+            emoji = "🚀" if pnl_pct >= 0.5 else "📈" if pnl_pct >= 0 else "📉" if pnl_pct >= -0.25 else "💀"
+            
+            caption = f"{emoji} <b>${symbol} PnL: {pnl_text}</b>\n\n"
+            caption += f"💰 P&L: {format_usd(pnl_usd)}\n"
+            caption += f"📊 Token: <code>{mint}</code>\n"
+            caption += f"💎 Current Price: {format_usd(price)}\n"
+            caption += f"🎯 Entry Price: {format_usd(pos.get('avg_entry_price_usd', 0))}\n\n"
+            caption += f"🤖 <i>Powered by RokuTrade</i>"
+            
+            # Send photo with caption
+            await q.message.reply_photo(
+                photo=image_url,
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            await q.message.reply_text("❌ No PnL data available for this token")
+            
+    except Exception as e:
+        await q.message.reply_text(f"❌ Error sharing PnL: {str(e)}")
+
+async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
+    """Share full portfolio summary with CEX-like interface"""
+    user_id = q.from_user.id
+    w = database.get_user_wallet(user_id)
+    addr = (w or {}).get("address")
+    
+    if not addr:
+        await q.message.reply_text("❌ No wallet found")
+        return
+    
+    try:
+        # Recalculate portfolio stats (similar to assets view)
+        sol_amount = await svc_get_sol_balance(addr)
+        sol_price = await get_sol_price_usd()
+        sol_usd = sol_amount * sol_price if sol_price > 0 else 0.0
+        
+        tokens = await svc_get_token_balances(addr, min_amount=0.0)
+        items = []
+        mints = []
+        
+        for t in tokens or []:
+            mint = t.get("mint") or t.get("mintAddress")
+            amt = float(t.get("amount") or t.get("uiAmount") or 0)
+            if mint and amt > 0:
+                mints.append(mint)
+                items.append({"mint": mint, "amount": amt})
+        
+        # Get metadata and pricing
+        packs_by_mint = await DexCache.get_bulk(mints, prefer_cache=True)
+        metas = await asyncio.gather(*(MetaCache.get(m) for m in mints), return_exceptions=True)
+        
+        # Calculate portfolio totals
+        total_pnl_usd = 0
+        total_cost_usd = 0
+        tokens_total_usd = 0
+        profitable_positions = 0
+        total_positions = 0
+        
+        for it, meta in zip(items, metas):
+            pack = packs_by_mint.get(it["mint"], {"price": 0.0})
+            meta = meta if isinstance(meta, dict) else {}
+            px = float(pack.get("price") or 0.0)
+            usd = it["amount"] * px if px > 0 else 0.0
+            tokens_total_usd += usd
+            
+            if usd >= 1.0:  # Only count positions > $1
+                total_positions += 1
+                pos = database.position_get(user_id, it["mint"]) or {}
+                if pos and px > 0:
+                    avg_px = pos.get("avg_entry_price_usd")
+                    if isinstance(avg_px, (int, float)) and avg_px > 0:
+                        cost_usd = it["amount"] * avg_px
+                        pnl_usd = usd - cost_usd
+                        total_pnl_usd += pnl_usd
+                        total_cost_usd += cost_usd
+                        if px > avg_px:
+                            profitable_positions += 1
+        
+        total_usd = sol_usd + tokens_total_usd
+        portfolio_pnl_pct = (total_pnl_usd / total_cost_usd) if total_cost_usd > 0 else None
+        win_rate = (profitable_positions / total_positions * 100) if total_positions > 0 else 0
+        
+        # Select appropriate image based on portfolio PnL
+        if portfolio_pnl_pct is not None:
+            image_url = get_pnl_image_url(portfolio_pnl_pct)
+            emoji = "🚀" if portfolio_pnl_pct >= 0.5 else "📈" if portfolio_pnl_pct >= 0 else "📉" if portfolio_pnl_pct >= -0.25 else "💀"
+            pnl_text = f"{portfolio_pnl_pct*100:+.1f}%" if portfolio_pnl_pct else "0.0%"
+        else:
+            # Default to positive image for portfolios without PnL data
+            image_url = get_pnl_image_url(0.1)
+            emoji = "💼"
+            pnl_text = "N/A"
+        
+        # Create comprehensive portfolio share message
+        caption = f"{emoji} <b>My Portfolio Performance</b>\n\n"
+        caption += f"💼 <b>Total Value:</b> {format_usd(total_usd)}\n"
+        if portfolio_pnl_pct is not None:
+            caption += f"📊 <b>Total PnL:</b> {pnl_text} ({format_usd(total_pnl_usd)})\n"
+        caption += f"🎯 <b>Positions:</b> {total_positions} | Win Rate: {win_rate:.1f}%\n"
+        caption += f"💰 <b>SOL:</b> {sol_amount:.3f} ({format_usd(sol_usd)})\n"
+        caption += f"🪙 <b>Tokens:</b> {format_usd(tokens_total_usd)}\n\n"
+        caption += f"👛 <code>{addr[:8]}...{addr[-8:]}</code>\n\n"
+        caption += f"🤖 <i>Trading with RokuTrade</i>"
+        
+        # Send portfolio summary with image
+        await q.message.reply_photo(
+            photo=image_url,
+            caption=caption,
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        await q.message.reply_text(f"❌ Error sharing portfolio: {str(e)}")
 
 # ===== Copy Trading UI =====
 async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
