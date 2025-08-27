@@ -65,5 +65,5 @@ def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 20
     # Formula: (cu_price_micro / 5,000,000) = SOL priority fee
     BASELINE_CU_FOR_1_SOL = 5_000_000
     result = cu_price_micro / BASELINE_CU_FOR_1_SOL
-    print(f"🔍 DEBUG cu_to_sol_priority_fee: {cu_price_micro} ÷ {BASELINE_CU_FOR_1_SOL} = {result} SOL")
+    print(f"DEBUG cu_to_sol_priority_fee: {cu_price_micro} / {BASELINE_CU_FOR_1_SOL} = {result} SOL")
     return result
