@@ -73,9 +73,16 @@ def cu_to_sol_priority_fee(cu_price_micro: Optional[int], estimated_cu: int = 20
     
     Simplified calculation: 5,000,000 micro-lamports/CU = 1 SOL baseline
     Other values scale proportionally from this baseline.
+    Includes safety cap to prevent excessive fees.
     """
     if cu_price_micro is None or cu_price_micro <= 0:
         return PRIORITY_FEE_SOL_DEFAULT  # use consistent default
+    
+    # Safety cap: Prevent excessive priority fees (max 0.05 SOL = ~$10)
+    MAX_REASONABLE_CU_PRICE = 250_000  # 5x ULTRA tier
+    if cu_price_micro > MAX_REASONABLE_CU_PRICE:
+        print(f"WARNING: CU price {cu_price_micro} exceeds reasonable limit {MAX_REASONABLE_CU_PRICE}, capping to prevent excessive fees")
+        cu_price_micro = MAX_REASONABLE_CU_PRICE
     
     # Simple baseline: 5,000,000 micro-lamports/CU = 1 SOL
     # Formula: (cu_price_micro / 5,000,000) = SOL priority fee

@@ -185,7 +185,8 @@ app.post('/dex/swap', async (req: Request, res: Response) => {
       exactOut = false,
       forceLegacy = false,
       // Priority fee options (in order of precedence)
-      priorityFee,                      // SOL amount (highest priority)
+      priorityFeeLamports,              // Direct lamports (NEW - highest priority)
+      priorityFee,                      // SOL amount (high priority)
       computeUnitPriceMicroLamports,    // CU price (legacy)
       priorityTier,                     // tier string (fallback)
     } = req.body || {};
@@ -196,22 +197,30 @@ app.post('/dex/swap', async (req: Request, res: Response) => {
 
     // Priority fee resolution logic (matches Python unified system)
     let finalPriorityFee: number | undefined;
+    let finalPriorityFeeLamports: number | undefined;
     let cuPrice: number | undefined;
     
-    // Priority 1: Use SOL amount if provided (from Python unified system)
-    if (typeof priorityFee === 'number' && priorityFee > 0) {
-      finalPriorityFee = priorityFee;
-      console.log(`🔍 DEBUG: Using priorityFee from Python: ${priorityFee} SOL`);
+    // Priority 1: Use direct lamports if provided (NEW - for Jupiter API)
+    if (typeof priorityFeeLamports === 'number' && priorityFeeLamports > 0) {
+      finalPriorityFeeLamports = priorityFeeLamports;
+      finalPriorityFee = priorityFeeLamports / 1_000_000_000;  // Convert to SOL for logging
+      console.log(`DEBUG: Using priorityFeeLamports from Python: ${priorityFeeLamports} lamports = ${finalPriorityFee} SOL`);
     }
-    // Priority 2: Use CU price if provided (legacy)
+    // Priority 2: Use SOL amount if provided (from Python unified system)
+    else if (typeof priorityFee === 'number' && priorityFee > 0) {
+      finalPriorityFee = priorityFee;
+      finalPriorityFeeLamports = Math.round(priorityFee * 1_000_000_000);
+      console.log(`DEBUG: Using priorityFee from Python: ${priorityFee} SOL = ${finalPriorityFeeLamports} lamports`);
+    }
+    // Priority 3: Use CU price if provided (legacy)
     else if (typeof computeUnitPriceMicroLamports === 'number' && computeUnitPriceMicroLamports >= 0) {
       cuPrice = computeUnitPriceMicroLamports;
-      console.log(`🔍 DEBUG: Using computeUnitPriceMicroLamports: ${computeUnitPriceMicroLamports}`);
+      console.log(`DEBUG: Using computeUnitPriceMicroLamports: ${computeUnitPriceMicroLamports}`);
     }
-    // Priority 3: Use tier fallback
+    // Priority 4: Use tier fallback
     else {
       cuPrice = chooseCuPrice(priorityTier);
-      console.log(`🔍 DEBUG: Using tier fallback: ${priorityTier} -> ${cuPrice}`);
+      console.log(`DEBUG: Using tier fallback: ${priorityTier} -> ${cuPrice}`);
     }
 
     const sig = await dexSwap({
@@ -223,8 +232,9 @@ app.post('/dex/swap', async (req: Request, res: Response) => {
       exactOut: !!exactOut,
       forceLegacy: !!forceLegacy,
       // Use unified priority fee system
-      priorityFee: finalPriorityFee,  // SOL amount (preferred)
-      computeUnitPriceMicroLamports: cuPrice,  // CU price (fallback)
+      priorityFeeLamports: finalPriorityFeeLamports,  // Direct lamports (preferred for Jupiter)
+      priorityFee: finalPriorityFee,  // SOL amount (secondary)
+      computeUnitPriceMicroLamports: cuPrice,  // CU price (legacy fallback)
     });
 
     return res.json({ signature: sig });
