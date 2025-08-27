@@ -62,19 +62,25 @@ export async function buildSwapTx(opts) {
         wrapAndUnwrapSol: opts.wrapAndUnwrapSol !== false,
         dynamicComputeUnitLimit: opts.dynamicComputeUnitLimit !== false,
     };
-    // Priority fee handling - prefer new API format
+    // Priority fee handling - correct Jupiter API format
     if (opts.priorityFeeLamports != null) {
-        // Use new Jupiter API format
+        // CORRECT Jupiter API format from documentation
         baseBody.prioritizationFeeLamports = {
             priorityLevelWithMaxLamports: {
                 maxLamports: opts.priorityFeeLamports,
+                global: false, // Use local fee market estimation
                 priorityLevel: "veryHigh"
             }
         };
+        console.log(`🔍 DEBUG Jupiter API Body: prioritizationFeeLamports =`, JSON.stringify(baseBody.prioritizationFeeLamports));
     }
     else if (opts.computeUnitPriceMicroLamports != null) {
         // Legacy fallback
         baseBody.computeUnitPriceMicroLamports = opts.computeUnitPriceMicroLamports;
+        console.log(`🔍 DEBUG Jupiter API Body: computeUnitPriceMicroLamports = ${opts.computeUnitPriceMicroLamports}`);
+    }
+    else {
+        console.log(`🔍 DEBUG Jupiter API Body: No priority fee parameters set`);
     }
     if (opts.asLegacyTransaction)
         baseBody.asLegacyTransaction = true;
@@ -89,8 +95,18 @@ export async function buildSwapTx(opts) {
     for (const base of BASES) {
         try {
             const r = await axios.post(url(base, '/swap'), baseBody, { httpsAgent, timeout: 15000, validateStatus: () => true, headers: { 'Content-Type': 'application/json', ...headersFor(base) } });
-            if (r.status === 200 && r.data?.swapTransaction)
-                return r.data.swapTransaction;
+            // Debug: Log Jupiter API response
+            if (r.status === 200) {
+                console.log(`✅ Jupiter API Success: ${base} responded with status 200`);
+                if (r.data?.swapTransaction) {
+                    console.log(`✅ Got swapTransaction from Jupiter (length: ${r.data.swapTransaction.length})`);
+                    return r.data.swapTransaction;
+                }
+            }
+            else {
+                console.log(`❌ Jupiter API Error: ${base} responded with status ${r.status}`);
+                console.log(`   Response: ${JSON.stringify(r.data).slice(0, 500)}`);
+            }
             if ((r.status === 400 || r.status === 422) && !baseBody.asLegacyTransaction) {
                 const r2 = await axios.post(url(base, '/swap'), { ...baseBody, asLegacyTransaction: true }, { httpsAgent, timeout: 15000, validateStatus: () => true, headers: { 'Content-Type': 'application/json', ...headersFor(base) } });
                 if (r2.status === 200 && r2.data?.swapTransaction)

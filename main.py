@@ -7,8 +7,13 @@ import asyncio
 import httpx
 from datetime import datetime, timezone
 from typing import Optional
-from copy_trading import copytrading_loop
 from enum import Enum
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
+
+from copy_trading import copytrading_loop
 
 
 # Import CU price configuration and user settings
@@ -129,9 +134,6 @@ async def handle_admin_user_stats(update: Update, context: ContextTypes.DEFAULT_
 
 # CU Settings conversation states
 SET_CU_PRICE = 1
-# -------- env must be loaded BEFORE os.getenv is called --------
-from dotenv import load_dotenv
-load_dotenv()
 # -------- ENV --------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TRADE_SVC_URL      = os.getenv("TRADE_SVC_URL", "http://localhost:8080").rstrip("/")
