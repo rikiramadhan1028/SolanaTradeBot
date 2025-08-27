@@ -88,24 +88,19 @@ export async function buildSwapTx(opts: SwapOpts): Promise<string> {
     dynamicComputeUnitLimit: opts.dynamicComputeUnitLimit !== false,
   };
   
-  // Priority fee handling - different format per endpoint
+  // Priority fee handling - try multiple formats
   function addPriorityFeeToBody(body: any, base: string) {
     if (opts.priorityFeeLamports != null) {
-      // For v6 API (quote-api.jup.ag)
+      // For v6 API (quote-api.jup.ag) - use direct lamports format
       if (base.includes('quote-api.jup.ag')) {
-        body.prioritizationFeeLamports = {
-          priorityLevelWithMaxLamports: {
-            maxLamports: opts.priorityFeeLamports,
-            global: false,
-            priorityLevel: "veryHigh"
-          }
-        };
-        console.log(`DEBUG Jupiter v6 API: prioritizationFeeLamports = ${JSON.stringify(body.prioritizationFeeLamports)}`);
+        // Simple direct priority fee in lamports - this is the correct format for v6
+        body.prioritizationFeeLamports = opts.priorityFeeLamports;
+        console.log(`DEBUG Jupiter v6 API: Direct prioritizationFeeLamports = ${opts.priorityFeeLamports}`);
       }
       // For v1 APIs (api.jup.ag, lite-api.jup.ag) - use legacy format
       else {
-        // Convert lamports to CU price (rough estimate: 1M lamports ≈ 5000 micro-lamports per CU)
-        const cuPrice = Math.round((opts.priorityFeeLamports * 5) / 1000);
+        // Convert lamports to CU price (more aggressive conversion)
+        const cuPrice = Math.round((opts.priorityFeeLamports * 10) / 1000);
         body.computeUnitPriceMicroLamports = cuPrice;
         console.log(`DEBUG Jupiter v1 API: computeUnitPriceMicroLamports = ${cuPrice} (from ${opts.priorityFeeLamports} lamports)`);
       }
