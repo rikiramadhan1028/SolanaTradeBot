@@ -58,3 +58,5 @@ hybrid_client_example.py
 # ✅ If using vercel.json or runtime.txt
 !vercel.json
 !runtime.txt
+debug_priority_fee.py
+trade-svc/nul
