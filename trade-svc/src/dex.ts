@@ -191,12 +191,14 @@ export async function dexSwap(p: SwapParams): Promise<string> {
     amountRaw: amountLamports,
   });
 
-  // --- FIX: konversi priorityFee (SOL) → computeUnitPriceMicroLamports (µ-lamports/CU)
-  // Rumus benar: compute = (priorityFee_SOL * 1e9 lamports/SOL * 1e6 micro/lamport) / expectedCU
-  // Gunakan EXPECTED_CU (default 250k) agar tip per-CU realistis untuk Jupiter swap (~200k–300k CU)
-  const EXPECTED_CU = Number(process.env.EXPECTED_CU || '250000');
+  // --- Priority fee conversion matching Python baseline system
+  // Python baseline: 5,000,000 micro-lamports/CU = 1 SOL
+  // Formula: priorityFee_SOL * 5,000,000 = micro-lamports/CU
+  const BASELINE_CU_FOR_1_SOL = 5_000_000;
   const computeFromSol = (pf: number) =>
-    Math.max(1, Math.floor((pf * 1_000_000_000 * 1_000_000) / Math.max(1, EXPECTED_CU)));
+    Math.max(1, Math.floor(pf * BASELINE_CU_FOR_1_SOL));
+    
+  console.log(`🔍 DEBUG TypeScript fee conversion: ${priorityFee} SOL * ${BASELINE_CU_FOR_1_SOL} = ${priorityFee > 0 ? computeFromSol(priorityFee) : 'N/A'} micro-lamports/CU`);
 
   const computeUnitPriceMicroLamports =
     computeOverride ?? (priorityFee > 0 ? computeFromSol(priorityFee) : undefined);

@@ -184,19 +184,35 @@ app.post('/dex/swap', async (req: Request, res: Response) => {
       slippageBps = 50,
       exactOut = false,
       forceLegacy = false,
-      // Opsi fee baru
-      computeUnitPriceMicroLamports,
-      priorityTier,
+      // Priority fee options (in order of precedence)
+      priorityFee,                      // SOL amount (highest priority)
+      computeUnitPriceMicroLamports,    // CU price (legacy)
+      priorityTier,                     // tier string (fallback)
     } = req.body || {};
 
     if (!privateKey || !inputMint || !outputMint || !amountLamports) {
       return res.status(400).json({ error: 'missing required fields: privateKey, inputMint, outputMint, amountLamports' });
     }
 
-    // Logika untuk memilih priority fee: utamakan nilai eksplisit, fallback ke tier
-    const cuPrice = (typeof computeUnitPriceMicroLamports === 'number' && computeUnitPriceMicroLamports >= 0)
-      ? computeUnitPriceMicroLamports
-      : chooseCuPrice(priorityTier);
+    // Priority fee resolution logic (matches Python unified system)
+    let finalPriorityFee: number | undefined;
+    let cuPrice: number | undefined;
+    
+    // Priority 1: Use SOL amount if provided (from Python unified system)
+    if (typeof priorityFee === 'number' && priorityFee > 0) {
+      finalPriorityFee = priorityFee;
+      console.log(`🔍 DEBUG: Using priorityFee from Python: ${priorityFee} SOL`);
+    }
+    // Priority 2: Use CU price if provided (legacy)
+    else if (typeof computeUnitPriceMicroLamports === 'number' && computeUnitPriceMicroLamports >= 0) {
+      cuPrice = computeUnitPriceMicroLamports;
+      console.log(`🔍 DEBUG: Using computeUnitPriceMicroLamports: ${computeUnitPriceMicroLamports}`);
+    }
+    // Priority 3: Use tier fallback
+    else {
+      cuPrice = chooseCuPrice(priorityTier);
+      console.log(`🔍 DEBUG: Using tier fallback: ${priorityTier} -> ${cuPrice}`);
+    }
 
     const sig = await dexSwap({
       privateKey,
@@ -206,9 +222,9 @@ app.post('/dex/swap', async (req: Request, res: Response) => {
       slippageBps: Number(slippageBps),
       exactOut: !!exactOut,
       forceLegacy: !!forceLegacy,
-      // Penting: teruskan fee per-CU yang sudah dihitung ke backend
-      computeUnitPriceMicroLamports: cuPrice,
-      priorityFee: 0, // Abaikan priorityFee lama untuk menghindari kebingungan
+      // Use unified priority fee system
+      priorityFee: finalPriorityFee,  // SOL amount (preferred)
+      computeUnitPriceMicroLamports: cuPrice,  // CU price (fallback)
     });
 
     return res.json({ signature: sig });
