@@ -290,6 +290,50 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
 (WITHDRAW_AMOUNT, WITHDRAW_ADDRESS) = range(11, 13)
 
 # ================== UI Helpers ==================
+
+# ================== Message Cleanup Helpers ==================
+async def delete_user_message(update: Update) -> None:
+    """Auto-delete user input message to keep chat clean"""
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+async def delete_previous_bot_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Delete previous bot message stored in context"""
+    if context.user_data.get("last_bot_message_id"):
+        try:
+            bot = context.bot
+            await bot.delete_message(
+                chat_id=chat_id,
+                message_id=context.user_data["last_bot_message_id"]
+            )
+        except Exception:
+            pass
+
+async def store_bot_message(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> None:
+    """Store bot message ID for later cleanup"""
+    context.user_data["last_bot_message_id"] = message_id
+
+async def clear_message_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all message-related context data"""
+    context.user_data.pop("last_bot_message_id", None)
+    context.user_data.pop("last_bot_message", None)
+
+async def safe_edit_message(query, text: str, **kwargs):
+    """Safely edit message and store ID for cleanup"""
+    try:
+        response = await query.edit_message_text(text, **kwargs)
+        return response
+    except Exception:
+        # If edit fails, send new message
+        response = await query.message.reply_text(text, **kwargs)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return response
+
 def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
     rows = []
     if prev_cb:
@@ -1126,41 +1170,63 @@ async def copy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return COPY_AWAIT_LEADER
 
 async def copy_add_leader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Auto-delete user input message
+    await delete_user_message(update)
+    
     leader = (update.message.text or "").strip()
     if not _is_pubkey(leader):
-        await update.message.reply_html("❌ Invalid pubkey. Please try again.", reply_markup=back_markup("copy_menu"))
+        response = await update.message.reply_html("❌ Invalid pubkey. Please try again.", reply_markup=back_markup("copy_menu"))
+        await store_bot_message(context, response.message_id)
         return COPY_AWAIT_LEADER
     context.user_data["copy_leader"] = leader
-    await update.message.reply_html(
+    
+    # Delete previous bot message
+    await delete_previous_bot_message(context, update.effective_chat.id)
+    
+    response = await update.message.reply_html(
         "✅ Leader accepted.\n\nNow send the <b>ratio</b> (e.g. <code>1</code> for 1:1, <code>0.5</code> for half).",
         reply_markup=back_markup("copy_menu"),
     )
+    await store_bot_message(context, response.message_id)
     return COPY_AWAIT_RATIO
 
 async def copy_add_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Auto-delete user input message
+    await delete_user_message(update)
+    
     try:
         ratio = float((update.message.text or "").strip())
         if ratio <= 0 or ratio > 100:
             raise ValueError()
     except Exception:
-        await update.message.reply_html("❌ Invalid ratio. Example: <code>1</code> or <code>0.5</code>.",
+        response = await update.message.reply_html("❌ Invalid ratio. Example: <code>1</code> or <code>0.5</code>.",
                                         reply_markup=back_markup("copy_menu"))
+        await store_bot_message(context, response.message_id)
         return COPY_AWAIT_RATIO
     context.user_data["copy_ratio"] = ratio
-    await update.message.reply_html(
+    
+    # Delete previous bot message
+    await delete_previous_bot_message(context, update.effective_chat.id)
+    
+    response = await update.message.reply_html(
         "👌 Now send the <b>max SOL per trade</b> (e.g. <code>0.25</code>).",
         reply_markup=back_markup("copy_menu"),
     )
+    await store_bot_message(context, response.message_id)
     return COPY_AWAIT_MAX
 
 async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Auto-delete user input message
+    await delete_user_message(update)
+    
     try:
         max_sol = float((update.message.text or "").strip())
         if max_sol <= 0 or max_sol > 1000:
             raise ValueError()
     except Exception:
-        await update.message.reply_html("❌ Invalid max SOL. Example: <code>0.25</code>.",
+        response = await update.message.reply_html("❌ Invalid max SOL. Example: <code>0.25</code>.",
                                         reply_markup=back_markup("copy_menu"))
+        await store_bot_message(context, response.message_id)
         return COPY_AWAIT_MAX
 
     user_id = update.effective_user.id
@@ -1172,6 +1238,10 @@ async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # clear context & return to menu
     context.user_data.pop("copy_leader", None)
     context.user_data.pop("copy_ratio", None)
+    
+    # Delete previous bot message
+    await delete_previous_bot_message(context, update.effective_chat.id)
+    await clear_message_context(context)
 
     await update.message.reply_html("✅ Leader added & activated.", reply_markup=back_markup("copy_menu"))
     # refresh menu
@@ -1275,7 +1345,7 @@ async def handle_confirm_export_private_key(update: Update, context: ContextType
         )
         return
     
-    await query.edit_message_text(
+    response = await query.edit_message_text(
         "🔐 <b>Your Wallet Export</b>\n\n"
         f"Address:\n<code>{address}</code>\n\n"
         "⚠️ <b>Private Key (BACKUP & DO NOT SHARE):</b>\n"
@@ -1283,10 +1353,31 @@ async def handle_confirm_export_private_key(update: Update, context: ContextType
         "💡 <b>Important:</b>\n"
         "• Save this private key in a secure location\n"
         "• Never share it with anyone\n"
-        "• This message will be deleted for security",
+        "• This message will auto-delete in 2 minutes for security",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Delete Now", callback_data="delete_private_key_msg"), InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
     )
+    
+    # Auto-delete after 2 minutes for security
+    import asyncio
+    async def delayed_delete():
+        await asyncio.sleep(120)  # 2 minutes
+        try:
+            await response.delete()
+        except Exception:
+            pass
+    
+    # Start the delayed delete task
+    asyncio.create_task(delayed_delete())
+
+async def handle_delete_private_key_msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete private key message immediately"""
+    query = update.callback_query
+    await query.answer("Message deleted for security 🗑️")
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
 
 async def handle_withdraw_sol_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Start withdraw conversation"""
@@ -1334,47 +1425,69 @@ async def handle_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_T
     amount_str = update.message.text.strip()
     current_balance = context.user_data.get("current_balance", 0)
     
+    # Auto-delete user input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    
     try:
         if amount_str.lower() == "all":
             # Reserve some for transaction fee
             amount = max(0, current_balance - 0.005)
             if amount <= 0:
-                await update.message.reply_text(
+                response = await update.message.reply_text(
                     "❌ Insufficient balance for withdrawal (need to reserve for transaction fee).",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
                 )
+                # Store message for potential cleanup
+                context.user_data["last_bot_message"] = response.message_id
                 return WITHDRAW_AMOUNT
         else:
             amount = float(amount_str)
             if amount <= 0:
-                await update.message.reply_text(
+                response = await update.message.reply_text(
                     "❌ Amount must be greater than 0.\nPlease send a valid amount or 'all':",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
                 )
+                context.user_data["last_bot_message"] = response.message_id
                 return WITHDRAW_AMOUNT
             
             if amount > current_balance:
-                await update.message.reply_text(
+                response = await update.message.reply_text(
                     f"❌ Insufficient balance. You have {current_balance:.6f} SOL.\nPlease send a valid amount:",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
                 )
+                context.user_data["last_bot_message"] = response.message_id
                 return WITHDRAW_AMOUNT
         
         context.user_data["withdraw_amount"] = amount
         
-        await update.message.reply_text(
+        # Delete previous bot message if exists
+        if context.user_data.get("last_bot_message"):
+            try:
+                await update.message.get_bot().delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=context.user_data["last_bot_message"]
+                )
+            except Exception:
+                pass
+        
+        response = await update.message.reply_text(
             f"✅ Amount: <b>{amount:.6f} SOL</b>\n\n"
             "Now send the destination address:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
         )
+        context.user_data["last_bot_message"] = response.message_id
         return WITHDRAW_ADDRESS
         
     except ValueError:
-        await update.message.reply_text(
+        response = await update.message.reply_text(
             "❌ Invalid amount. Please enter a number or 'all':",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
         )
+        context.user_data["last_bot_message"] = response.message_id
         return WITHDRAW_AMOUNT
 
 async def handle_withdraw_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1383,8 +1496,14 @@ async def handle_withdraw_address(update: Update, context: ContextTypes.DEFAULT_
     amount = context.user_data.get("withdraw_amount")
     wallet_info = context.user_data.get("withdraw_wallet_info")
     
+    # Auto-delete user input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    
     if not wallet_info or not amount:
-        await update.message.reply_text(
+        response = await update.message.reply_text(
             "❌ Session expired. Please start over.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
         )
@@ -1394,11 +1513,32 @@ async def handle_withdraw_address(update: Update, context: ContextTypes.DEFAULT_
     
     # Validate address format (basic check)
     if len(to_addr) < 32 or len(to_addr) > 44:
-        await update.message.reply_text(
+        # Delete previous bot message if exists
+        if context.user_data.get("last_bot_message"):
+            try:
+                await update.message.get_bot().delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=context.user_data["last_bot_message"]
+                )
+            except Exception:
+                pass
+                
+        response = await update.message.reply_text(
             "❌ Invalid address format. Please send a valid Solana address:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
         )
+        context.user_data["last_bot_message"] = response.message_id
         return WITHDRAW_ADDRESS
+    
+    # Delete previous bot message if exists
+    if context.user_data.get("last_bot_message"):
+        try:
+            await update.message.get_bot().delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=context.user_data["last_bot_message"]
+            )
+        except Exception:
+            pass
     
     # Show confirmation
     keyboard = [
@@ -1406,7 +1546,7 @@ async def handle_withdraw_address(update: Update, context: ContextTypes.DEFAULT_
         [InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]
     ]
     
-    await update.message.reply_text(
+    response = await update.message.reply_text(
         f"🔍 <b>Confirm Withdrawal</b>\n\n"
         f"Amount: <b>{amount:.6f} SOL</b>\n"
         f"To: <code>{to_addr}</code>\n"
@@ -1417,6 +1557,7 @@ async def handle_withdraw_address(update: Update, context: ContextTypes.DEFAULT_
     )
     
     context.user_data["withdraw_to_address"] = to_addr
+    context.user_data["last_bot_message"] = response.message_id
     return WITHDRAW_ADDRESS
 
 async def handle_withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1464,6 +1605,7 @@ async def handle_withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_
     context.user_data.pop("withdraw_to_address", None)
     context.user_data.pop("withdraw_wallet_info", None)
     context.user_data.pop("current_balance", None)
+    context.user_data.pop("last_bot_message", None)
     
     return ConversationHandler.END
 
@@ -1477,6 +1619,7 @@ async def handle_withdraw_cancel(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("withdraw_to_address", None)
     context.user_data.pop("withdraw_wallet_info", None)
     context.user_data.pop("current_balance", None)
+    context.user_data.pop("last_bot_message", None)
     
     await query.edit_message_text(
         "❌ Withdrawal cancelled.",
@@ -1491,6 +1634,9 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     command = command.lower()
 
     if command == "import":
+        # Auto-delete user message containing private key for security
+        await delete_user_message(update)
+        
         if len(args) == 0:
             await update.message.reply_text(
                 "❌ Invalid format. Use: `import [private_key]`",
@@ -1535,10 +1681,8 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=back_markup("back_to_main_menu"),
             )
         finally:
-            try:
-                await update.message.delete()
-            except Exception:
-                pass # Ignore if message can't be deleted
+            # Message already deleted at start for security
+            pass
         return
 
     if command == "send":
@@ -1866,6 +2010,9 @@ async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT
 
 async def handle_custom_cu_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle custom CU price input."""
+    # Auto-delete user input message
+    await delete_user_message(update)
+    
     if not context.user_data.get("awaiting_custom_cu"):
         return SET_CU_PRICE
     
@@ -1883,16 +2030,21 @@ async def handle_custom_cu_input(update: Update, context: ContextTypes.DEFAULT_T
         UserSettings.set_user_priority_tier(user_id, "custom" if user_cu_price else None)
         
         context.user_data.pop("awaiting_custom_cu", None)
+        # Delete previous bot message
+        await delete_previous_bot_message(context, update.effective_chat.id)
+        await clear_message_context(context)
+        
         await update.message.reply_html(
             f"✅ Custom priority set to <code>{_tier_of(user_cu_price)}</code>.",
             reply_markup=_settings_keyboard(),
         )
         return ConversationHandler.END
     except Exception:
-        await update.message.reply_html(
+        response = await update.message.reply_html(
             "❌ Invalid number. Send an integer like <code>2500</code>.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_settings")]]),
         )
+        await store_bot_message(context, response.message_id)
         return SET_CU_PRICE
 
 async def handle_delete_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2023,13 +2175,17 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
     return AWAITING_TRADE_ACTION
 
 async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Auto-delete user input message
+    await delete_user_message(update)
+    
     try:
         amount = float(update.message.text.strip())
         if amount <= 0:
-            await update.message.reply_text(
+            response = await update.message.reply_text(
                 "❌ Amount must be greater than 0.",
                 reply_markup=back_markup("back_to_token_panel"),
             )
+            await store_bot_message(context, response.message_id)
             return AWAITING_AMOUNT
         context.user_data["trade_type"] = context.user_data.get("trade_type", "buy")
         context.user_data["amount_type"] = "sol"
@@ -2037,10 +2193,11 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         # Only end conversation if trade was successful
         return ConversationHandler.END if result else AWAITING_TRADE_ACTION
     except (ValueError, IndexError):
-        await update.message.reply_text(
+        response = await update.message.reply_text(
             "❌ Invalid amount. Please enter a valid number.",
             reply_markup=back_markup("back_to_token_panel"),
         )
+        await store_bot_message(context, response.message_id)
         return AWAITING_AMOUNT
 
 # ------------------------- FEE helper -------------------------
@@ -2747,6 +2904,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
     application.add_handler(CallbackQueryHandler(handle_export_private_key, pattern="^export_private_key$"))
     application.add_handler(CallbackQueryHandler(handle_confirm_export_private_key, pattern="^confirm_export_pk$"))
+    application.add_handler(CallbackQueryHandler(handle_delete_private_key_msg, pattern="^delete_private_key_msg$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
     # Settings handlers
     application.add_handler(CallbackQueryHandler(handle_menu_settings, pattern=r"^menu_settings$"))
