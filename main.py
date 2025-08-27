@@ -1450,7 +1450,32 @@ async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAU
 
 async def handle_back_to_token_panel_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Wrapper for back_to_token_panel that works outside conversations."""
-    await handle_back_to_token_panel(update, context)
+    # Clear any stale context first 
+    print(f"🔧 DEBUG: back_to_token_panel_outside_conv called")
+    print(f"   - user_data keys: {list(context.user_data.keys())}")
+    
+    # Ensure we have token_address
+    mint = context.user_data.get("token_address")
+    if not mint:
+        print(f"   - No token_address found, redirecting to buy_sell_menu")
+        return await handle_back_to_buy_sell_menu(update, context)
+    
+    # Build fresh token panel
+    q = update.callback_query
+    await q.answer()
+    panel = await build_token_panel(q.from_user.id, mint)
+    
+    # Reset conversation state cleanly - force restart conversation
+    # This ensures buttons will work properly
+    context.user_data["in_trade_conversation"] = True
+    
+    try:
+        await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+        print(f"   - Successfully returned to token panel for {mint[:8]}...")
+    except Exception as e:
+        print(f"   - Error updating message: {e}")
+        # Fallback: send new message if edit fails
+        await q.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
 
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1706,8 +1731,9 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
         amount = float(amount_str)
         context.user_data["trade_type"] = "buy"
         context.user_data["amount_type"] = "sol"
-        await perform_trade(update, context, amount)
-        return ConversationHandler.END
+        result = await perform_trade(update, context, amount)
+        # Only end conversation if trade was successful 
+        return ConversationHandler.END if result else AWAITING_TRADE_ACTION
 
     elif action == "buy_custom":
         context.user_data["trade_type"] = "buy"
@@ -1723,8 +1749,9 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
         percentage = int(percentage_str)
         context.user_data["trade_type"] = "sell"
         context.user_data["amount_type"] = "percentage"
-        await perform_trade(update, context, percentage)
-        return ConversationHandler.END
+        result = await perform_trade(update, context, percentage)
+        # Only end conversation if trade was successful
+        return ConversationHandler.END if result else AWAITING_TRADE_ACTION
 
     await query.message.reply_text(
         "This action is not yet implemented.",
@@ -1743,14 +1770,15 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             return AWAITING_AMOUNT
         context.user_data["trade_type"] = context.user_data.get("trade_type", "buy")
         context.user_data["amount_type"] = "sol"
-        await perform_trade(update, context, amount)
+        result = await perform_trade(update, context, amount)
+        # Only end conversation if trade was successful
+        return ConversationHandler.END if result else AWAITING_TRADE_ACTION
     except (ValueError, IndexError):
         await update.message.reply_text(
             "❌ Invalid amount. Please enter a valid number.",
             reply_markup=back_markup("back_to_token_panel"),
         )
         return AWAITING_AMOUNT
-    return ConversationHandler.END
 
 # ------------------------- FEE helper -------------------------
 def _fee_ui(val_ui: float) -> float:
@@ -1895,7 +1923,7 @@ async def _handle_trade_response(
     pre_sol_ui: float,
     pre_token_ui: float,
     prev_cb: str = "back_to_token_panel",   # <-- default aman
-):
+) -> bool:  # Return True if successful, False if failed
     if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
         # ==== update posisi (buy/sell) ====
         try:
@@ -1945,9 +1973,11 @@ async def _handle_trade_response(
 
         sig = res.get("signature") or res.get("bundle")
         await reply_ok_html(message, "✅ Swap successful!", prev_cb=prev_cb, signature=sig)
+        return True
     else:
         err = res.get("error") if isinstance(res, dict) else res
         await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb=prev_cb)
+        return False
 
 
 # ------------------------- Trade core -------------------------
@@ -1956,7 +1986,7 @@ async def perform_trade(
     context: ContextTypes.DEFAULT_TYPE,
     amount,
     prev_cb_on_end: str | None = None,   # <-- dibuat optional
-):
+) -> bool:  # Return True if successful, False if failed
     message = update.message if update.message else update.callback_query.message
     user_id = update.effective_user.id
     wallet = database.get_user_wallet(user_id)
@@ -1971,7 +2001,7 @@ async def perform_trade(
             "❌ No Solana wallet found. Please create or import one first.",
             prev_cb=prev_cb,
         )
-        return
+        return False
 
     # context
     trade_type   = (context.user_data.get("trade_type") or "").lower()      # buy|sell
@@ -1982,7 +2012,7 @@ async def perform_trade(
 
     if not token_mint:
         await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
-        return
+        return False
 
     # snapshot pra-trade
     try:
@@ -2001,7 +2031,7 @@ async def perform_trade(
 
     if prep.get("status") == "error":
         await reply_err_html(message, prep["message"], prev_cb=prev_cb)
-        return
+        return False
 
     await reply_ok_html(
         message,
@@ -2024,6 +2054,11 @@ async def perform_trade(
             user_priority_tier = get_user_priority_tier(str(user_id))
             user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
             
+            # Debug: Log priority fee selection for PumpFun
+            print(f"🔍 PUMPFUN Priority Debug - User {user_id}:")
+            print(f"   - user_priority_tier: {user_priority_tier}")
+            print(f"   - user_cu_price: {user_cu_price}")
+            
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
                 action=trade_type,
@@ -2040,6 +2075,11 @@ async def perform_trade(
             user_priority_tier = get_user_priority_tier(str(user_id))
             user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
             
+            # Debug: Log priority fee selection for DEX
+            print(f"🔍 DEX Priority Debug - User {user_id}:")
+            print(f"   - user_priority_tier: {user_priority_tier}")
+            print(f"   - user_cu_price: {user_cu_price}")
+            
             res = await dex_swap(
                 private_key=wallet["private_key"],
                 **prep["params"],
@@ -2048,7 +2088,7 @@ async def perform_trade(
             )
 
         # handle sukses/gagal + update posisi
-        await _handle_trade_response(
+        success = await _handle_trade_response(
             message,
             res,
             trade_type=trade_type,
@@ -2071,12 +2111,15 @@ async def perform_trade(
             except Exception as e:
                 print(f"⚠️ Fee check/send failed after sell: {e}")
 
+        return success
+
     except Exception as e:
         await reply_err_html(
             message,
             f"❌ An unexpected error occurred: {short_err_text(str(e))}",
             prev_cb=prev_cb,
         )
+        return False
     finally:
         clear_user_context(context)
 
@@ -2241,8 +2284,9 @@ async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.D
         if amount <= 0:
             raise ValueError()
         context.user_data["trade_type"] = "buy"
-        await perform_trade(update, context, amount)
-        return ConversationHandler.END
+        result = await perform_trade(update, context, amount)
+        # Only end conversation if trade was successful 
+        return ConversationHandler.END if result else AWAITING_TRADE_ACTION
     except (ValueError, IndexError):
         await update.message.reply_text(
             "❌ Invalid amount. Please enter a valid number.",
