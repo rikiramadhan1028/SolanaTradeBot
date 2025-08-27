@@ -32,9 +32,10 @@ const UA = 'trade-svc/1.0';
 const METIS_BASE = (process.env.METIS_BASE || '').replace(/\/$/, '');
 const JUP_PRO    = (process.env.JUP_PRO    || 'https://api.jup.ag/swap/v1').replace(/\/$/, '');
 const JUP_LITE   = (process.env.JUP_LITE   || 'https://lite-api.jup.ag/swap/v1').replace(/\/$/, '');
-const PUBLIC_JUP = (process.env.PUBLIC_JUP || 'https://www.jupiterapi.com').replace(/\/$/, '');
+const PUBLIC_JUP = (process.env.PUBLIC_JUP || 'https://quote-api.jup.ag/v6').replace(/\/$/, '');
 
-const BASES = [METIS_BASE, JUP_PRO, JUP_LITE, PUBLIC_JUP].filter(Boolean);
+// Prioritize public API first, then others
+const BASES = [PUBLIC_JUP, METIS_BASE, JUP_LITE, JUP_PRO].filter(Boolean);
 
 function headersFor(base: string) {
   const h: Record<string, string> = { 'User-Agent': UA };
@@ -87,24 +88,33 @@ export async function buildSwapTx(opts: SwapOpts): Promise<string> {
     dynamicComputeUnitLimit: opts.dynamicComputeUnitLimit !== false,
   };
   
-  // Priority fee handling - correct Jupiter API format
-  if (opts.priorityFeeLamports != null) {
-    // CORRECT Jupiter API format from documentation
-    baseBody.prioritizationFeeLamports = {
-      priorityLevelWithMaxLamports: {
-        maxLamports: opts.priorityFeeLamports,
-        global: false,  // Use local fee market estimation
-        priorityLevel: "veryHigh"
+  // Priority fee handling - different format per endpoint
+  function addPriorityFeeToBody(body: any, base: string) {
+    if (opts.priorityFeeLamports != null) {
+      // For v6 API (quote-api.jup.ag)
+      if (base.includes('quote-api.jup.ag')) {
+        body.prioritizationFeeLamports = {
+          priorityLevelWithMaxLamports: {
+            maxLamports: opts.priorityFeeLamports,
+            global: false,
+            priorityLevel: "veryHigh"
+          }
+        };
+        console.log(`DEBUG Jupiter v6 API: prioritizationFeeLamports = ${JSON.stringify(body.prioritizationFeeLamports)}`);
       }
-    };
-    
-    console.log(`🔍 DEBUG Jupiter API Body: prioritizationFeeLamports =`, JSON.stringify(baseBody.prioritizationFeeLamports));
-  } else if (opts.computeUnitPriceMicroLamports != null) {
-    // Legacy fallback
-    baseBody.computeUnitPriceMicroLamports = opts.computeUnitPriceMicroLamports;
-    console.log(`🔍 DEBUG Jupiter API Body: computeUnitPriceMicroLamports = ${opts.computeUnitPriceMicroLamports}`);
-  } else {
-    console.log(`🔍 DEBUG Jupiter API Body: No priority fee parameters set`);
+      // For v1 APIs (api.jup.ag, lite-api.jup.ag) - use legacy format
+      else {
+        // Convert lamports to CU price (rough estimate: 1M lamports ≈ 5000 micro-lamports per CU)
+        const cuPrice = Math.round((opts.priorityFeeLamports * 5) / 1000);
+        body.computeUnitPriceMicroLamports = cuPrice;
+        console.log(`DEBUG Jupiter v1 API: computeUnitPriceMicroLamports = ${cuPrice} (from ${opts.priorityFeeLamports} lamports)`);
+      }
+    } else if (opts.computeUnitPriceMicroLamports != null) {
+      body.computeUnitPriceMicroLamports = opts.computeUnitPriceMicroLamports;
+      console.log(`DEBUG Jupiter API: computeUnitPriceMicroLamports = ${opts.computeUnitPriceMicroLamports}`);
+    } else {
+      console.log(`DEBUG Jupiter API: No priority fee parameters set`);
+    }
   }
   
   if (opts.asLegacyTransaction) baseBody.asLegacyTransaction = true;
@@ -115,7 +125,16 @@ export async function buildSwapTx(opts: SwapOpts): Promise<string> {
 
   for (const base of BASES) {
     try {
-      const r = await axios.post(url(base, '/swap'), baseBody, { httpsAgent, timeout: 15000, validateStatus: () => true, headers: { 'Content-Type': 'application/json', ...headersFor(base) } });
+      // Create body copy and add appropriate priority fee format
+      const requestBody = { ...baseBody };
+      addPriorityFeeToBody(requestBody, base);
+      
+      const r = await axios.post(url(base, '/swap'), requestBody, { 
+        httpsAgent, 
+        timeout: 15000, 
+        validateStatus: () => true, 
+        headers: { 'Content-Type': 'application/json', ...headersFor(base) } 
+      });
       
       // Debug: Log Jupiter API response
       if (r.status === 200) {
@@ -128,8 +147,16 @@ export async function buildSwapTx(opts: SwapOpts): Promise<string> {
         console.log(`❌ Jupiter API Error: ${base} responded with status ${r.status}`);
         console.log(`   Response: ${JSON.stringify(r.data).slice(0, 500)}`);
       }
-      if ((r.status === 400 || r.status === 422) && !baseBody.asLegacyTransaction) {
-        const r2 = await axios.post(url(base, '/swap'), { ...baseBody, asLegacyTransaction: true }, { httpsAgent, timeout: 15000, validateStatus: () => true, headers: { 'Content-Type': 'application/json', ...headersFor(base) } });
+      
+      // Retry with legacy transaction if needed
+      if ((r.status === 400 || r.status === 422) && !requestBody.asLegacyTransaction) {
+        const retryBody = { ...requestBody, asLegacyTransaction: true };
+        const r2 = await axios.post(url(base, '/swap'), retryBody, { 
+          httpsAgent, 
+          timeout: 15000, 
+          validateStatus: () => true, 
+          headers: { 'Content-Type': 'application/json', ...headersFor(base) } 
+        });
         if (r2.status === 200 && r2.data?.swapTransaction) return r2.data.swapTransaction as string;
       }
     } catch (_) {
