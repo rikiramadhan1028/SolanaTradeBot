@@ -21,6 +21,7 @@ export type SwapParams = {
   dex?: 'jupiter' | 'raydium';
   slippageBps?: number;
   priorityFee?: number;     // **SOL**, total tip target per tx (e.g. 0.0001)
+  priorityFeeLamports?: number; // NEW: Direct lamports fee for Jupiter API
   exactOut?: boolean;       // if true → swapMode=ExactOut
   forceLegacy?: boolean;    // if true → asLegacyTransaction
   computeUnitPriceMicroLamports?: number; // override langsung (µ-lamports/CU)
@@ -73,7 +74,7 @@ async function getQuote(params: URLSearchParams) {
 
 async function buildSwapTx(body: any) {
   const known = new Set([
-    'quoteResponse','userPublicKey','wrapAndUnwrapSol','dynamicComputeUnitLimit','computeUnitPriceMicroLamports','asLegacyTransaction','destinationTokenAccount','feeAccount','dynamicSlippage'
+    'quoteResponse','userPublicKey','wrapAndUnwrapSol','dynamicComputeUnitLimit','computeUnitPriceMicroLamports','priorityFeeLamports','asLegacyTransaction','destinationTokenAccount','feeAccount','dynamicSlippage'
   ]);
   const extra: Record<string, any> = {};
   for (const [k, v] of Object.entries(body)) if (!known.has(k)) extra[k] = v;
@@ -83,6 +84,7 @@ async function buildSwapTx(body: any) {
     wrapAndUnwrapSol: body.wrapAndUnwrapSol !== false,
     dynamicComputeUnitLimit: body.dynamicComputeUnitLimit !== false,
     computeUnitPriceMicroLamports: body.computeUnitPriceMicroLamports,
+    priorityFeeLamports: body.priorityFeeLamports, // NEW: Pass through direct lamports
     asLegacyTransaction: !!body.asLegacyTransaction,
     destinationTokenAccount: body.destinationTokenAccount,
     feeAccount: body.feeAccount,
@@ -169,6 +171,7 @@ export async function dexSwap(p: SwapParams): Promise<string> {
     dex = 'jupiter',
     slippageBps = 50,
     priorityFee = 0,
+    priorityFeeLamports,
     exactOut = false,
     forceLegacy = false,
     computeUnitPriceMicroLamports: computeOverride,
@@ -191,17 +194,25 @@ export async function dexSwap(p: SwapParams): Promise<string> {
     amountRaw: amountLamports,
   });
 
-  // --- Priority fee conversion matching Python baseline system
-  // Python baseline: 5,000,000 micro-lamports/CU = 1 SOL
-  // Formula: priorityFee_SOL * 5,000,000 = micro-lamports/CU
-  const BASELINE_CU_FOR_1_SOL = 5_000_000;
-  const computeFromSol = (pf: number) =>
-    Math.max(1, Math.floor(pf * BASELINE_CU_FOR_1_SOL));
-    
-  console.log(`🔍 DEBUG TypeScript fee conversion: ${priorityFee} SOL * ${BASELINE_CU_FOR_1_SOL} = ${priorityFee > 0 ? computeFromSol(priorityFee) : 'N/A'} micro-lamports/CU`);
+  // --- Priority fee handling - prefer direct lamports for new Jupiter API
+  let finalPriorityFeeLamports: number | undefined;
+  let finalComputeUnitPriceMicroLamports: number | undefined;
+  
+  if (priorityFeeLamports != null) {
+    // Use direct lamports amount (new Jupiter API)
+    finalPriorityFeeLamports = priorityFeeLamports;
+    console.log(`DEBUG: Using direct priority fee: ${priorityFeeLamports} lamports`);
+  } else {
+    // Legacy conversion from SOL to micro-lamports/CU
+    const BASELINE_CU_FOR_1_SOL = 5_000_000;
+    const computeFromSol = (pf: number) =>
+      Math.max(1, Math.floor(pf * BASELINE_CU_FOR_1_SOL));
+      
+    console.log(`DEBUG TypeScript fee conversion: ${priorityFee} SOL * ${BASELINE_CU_FOR_1_SOL} = ${priorityFee > 0 ? computeFromSol(priorityFee) : 'N/A'} micro-lamports/CU`);
 
-  const computeUnitPriceMicroLamports =
-    computeOverride ?? (priorityFee > 0 ? computeFromSol(priorityFee) : undefined);
+    finalComputeUnitPriceMicroLamports =
+      computeOverride ?? (priorityFee > 0 ? computeFromSol(priorityFee) : undefined);
+  }
 
   // Retry 3x utk network/5xx/429
   let lastErr = '';
@@ -225,7 +236,8 @@ export async function dexSwap(p: SwapParams): Promise<string> {
         userPublicKey: user.publicKey.toBase58(),
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
-        computeUnitPriceMicroLamports,
+        priorityFeeLamports: finalPriorityFeeLamports,
+        computeUnitPriceMicroLamports: finalComputeUnitPriceMicroLamports,
         asLegacyTransaction: !!forceLegacy,
         // dynamicSlippage: true, // enable if you want Jupiter to tweak slippage
       });

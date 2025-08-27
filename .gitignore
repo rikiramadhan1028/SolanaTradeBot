@@ -60,3 +60,4 @@ hybrid_client_example.py
 !runtime.txt
 debug_priority_fee.py
 trade-svc/nul
+debug_jupiter_new_api.py

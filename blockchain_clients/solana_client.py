@@ -258,10 +258,18 @@ class SolanaClient:
                 if not quote:
                     return "Error: No swap quote found on Jupiter."
                 
+                # Convert to lamports for new Jupiter API
+                priority_fee_lamports = None
+                if compute_unit_price_micro_lamports is not None:
+                    # Convert micro-lamports to direct lamports fee
+                    # Estimate: 200k CU * micro_lamports / 1M = lamports
+                    priority_fee_lamports = int(compute_unit_price_micro_lamports * 200000 / 1_000_000)
+                
                 swap_transaction_b64 = await build_swap_tx(
                     quote_response=quote,
                     user_public_key=public_key_str,
-                    compute_unit_price_micro_lamports=compute_unit_price_micro_lamports,
+                    priority_fee_lamports=priority_fee_lamports,
+                    compute_unit_price_micro_lamports=compute_unit_price_micro_lamports,  # Keep as fallback
                     as_legacy=as_legacy,
                 )
                 if not swap_transaction_b64:

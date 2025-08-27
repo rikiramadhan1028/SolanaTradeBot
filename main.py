@@ -48,7 +48,13 @@ def get_user_cu_price(user_id: str) -> Optional[int]:
     return user_cu if user_cu is not None else cu_price
 
 def get_user_priority_tier(user_id: str) -> Optional[str]:
-    """Get user's priority tier based on their CU price setting."""
+    """Get user's priority tier from database settings."""
+    # First try to get stored priority tier
+    tier = UserSettings.get_user_priority_tier(user_id)
+    if tier:
+        return tier
+    
+    # Fallback: Map from legacy CU price setting
     user_cu = get_user_cu_price(user_id)
     if user_cu is None or user_cu == 0:
         return None
@@ -59,7 +65,7 @@ def get_user_priority_tier(user_id: str) -> Optional[str]:
     elif user_cu == DEX_CU_PRICE_MICRO_ULTRA:
         return "ultra"
     else:
-        return None  # Custom CU price, no tier
+        return "custom"  # Custom CU price
 
 def is_admin(user_id: int) -> bool:
     """Check if user is an admin."""
@@ -1456,17 +1462,27 @@ async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- CU Settings UI Functions ---
 def _tier_of(cu_val: Optional[int]) -> str:
-    """Return a display string for the current CU price."""
+    """Return a display string for the current CU price with SOL and lamports values."""
+    from cu_config import cu_to_sol_priority_fee
+    
     if cu_val is None or cu_val == 0:
-        return "OFF (0 μ-lamports/CU)"
+        return "OFF (0 SOL)"
     elif cu_val == DEX_CU_PRICE_MICRO_FAST:
-        return f"FAST ({cu_val} μ-lamports/CU)"
+        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
+        lamports = int(sol_fee * 1_000_000_000)
+        return f"FAST ({sol_fee:.3f} SOL = {lamports:,} lamports)"
     elif cu_val == DEX_CU_PRICE_MICRO_TURBO:
-        return f"TURBO ({cu_val} μ-lamports/CU)"
+        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
+        lamports = int(sol_fee * 1_000_000_000)
+        return f"TURBO ({sol_fee:.3f} SOL = {lamports:,} lamports)"
     elif cu_val == DEX_CU_PRICE_MICRO_ULTRA:
-        return f"ULTRA ({cu_val} μ-lamports/CU)"
+        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
+        lamports = int(sol_fee * 1_000_000_000)
+        return f"ULTRA ({sol_fee:.3f} SOL = {lamports:,} lamports)"
     else:
-        return f"CUSTOM ({cu_val} μ-lamports/CU)"
+        sol_fee = cu_to_sol_priority_fee(cu_val, 200000)
+        lamports = int(sol_fee * 1_000_000_000)
+        return f"CUSTOM ({sol_fee:.3f} SOL = {lamports:,} lamports)"
 
 def _settings_keyboard():
     """Return the settings menu keyboard."""

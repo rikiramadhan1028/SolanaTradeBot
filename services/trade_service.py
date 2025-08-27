@@ -2,7 +2,7 @@
 import os
 import httpx
 from typing import Any, Dict, Optional
-from cu_config import cu_to_sol_priority_fee, choose_priority_fee_sol, sol_to_cu_price
+from cu_config import cu_to_sol_priority_fee, choose_priority_fee_sol, choose_priority_fee_lamports, sol_to_cu_price
 
 # ---- Base URL normalizer ----
 _raw = os.getenv("TRADE_SVC_URL", "http://localhost:8080").strip().rstrip("/")
@@ -180,30 +180,40 @@ async def dex_swap(
     
     # UNIFIED PRIORITY FEE LOGIC - Fixed to handle None properly
     final_priority_fee_sol = None
+    final_priority_fee_lamports = None
     
     # Priority 1: Use tier if specified (NEW)
     if priority_tier:
         final_priority_fee_sol = choose_priority_fee_sol(priority_tier)
+        final_priority_fee_lamports = choose_priority_fee_lamports(priority_tier)
     # Priority 2: Convert CU to SOL if specified (legacy)
     elif compute_unit_price_micro_lamports is not None:
         final_priority_fee_sol = cu_to_sol_priority_fee(compute_unit_price_micro_lamports, 200000)
+        final_priority_fee_lamports = int(final_priority_fee_sol * 1_000_000_000)
     # Priority 3: Use direct SOL amount if explicitly provided
     elif priority_fee_sol is not None:
         final_priority_fee_sol = priority_fee_sol
+        final_priority_fee_lamports = int(priority_fee_sol * 1_000_000_000)
     # Priority 4: Use system default if nothing specified
     else:
-        from cu_config import PRIORITY_FEE_SOL_DEFAULT
+        from cu_config import PRIORITY_FEE_SOL_DEFAULT, PRIORITY_FEE_LAMPORTS_DEFAULT
         final_priority_fee_sol = PRIORITY_FEE_SOL_DEFAULT
+        final_priority_fee_lamports = PRIORITY_FEE_LAMPORTS_DEFAULT
     
-    # Always use SOL-based priority fee for consistency
+    # Use lamports for new Jupiter API
+    payload["priorityFeeLamports"] = final_priority_fee_lamports
+    
+    # Keep SOL for PumpFun compatibility
     payload["priorityFee"] = float(final_priority_fee_sol)
     
     # Debug: Log priority fee details
-    print(f"🔍 DEBUG dex_swap priority fee:")
+    print(f"DEBUG dex_swap priority fee:")
     print(f"   - priority_tier: {priority_tier}")
     print(f"   - compute_unit_price_micro_lamports: {compute_unit_price_micro_lamports}")
     print(f"   - priority_fee_sol param: {priority_fee_sol}")
     print(f"   - final_priority_fee_sol: {final_priority_fee_sol}")
+    print(f"   - final_priority_fee_lamports: {final_priority_fee_lamports}")
+    print(f"   - payload priorityFeeLamports: {payload['priorityFeeLamports']}")
     print(f"   - payload priorityFee: {payload['priorityFee']}")
     
     # Also provide CU-based for backends that need it

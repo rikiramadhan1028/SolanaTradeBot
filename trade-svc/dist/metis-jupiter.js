@@ -62,8 +62,20 @@ export async function buildSwapTx(opts) {
         wrapAndUnwrapSol: opts.wrapAndUnwrapSol !== false,
         dynamicComputeUnitLimit: opts.dynamicComputeUnitLimit !== false,
     };
-    if (opts.computeUnitPriceMicroLamports != null)
+    // Priority fee handling - prefer new API format
+    if (opts.priorityFeeLamports != null) {
+        // Use new Jupiter API format
+        baseBody.prioritizationFeeLamports = {
+            priorityLevelWithMaxLamports: {
+                maxLamports: opts.priorityFeeLamports,
+                priorityLevel: "veryHigh"
+            }
+        };
+    }
+    else if (opts.computeUnitPriceMicroLamports != null) {
+        // Legacy fallback
         baseBody.computeUnitPriceMicroLamports = opts.computeUnitPriceMicroLamports;
+    }
     if (opts.asLegacyTransaction)
         baseBody.asLegacyTransaction = true;
     if (opts.destinationTokenAccount)

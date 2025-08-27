@@ -90,6 +90,7 @@ async def build_swap_tx(
     *,
     wrap_and_unwrap_sol: bool = True,
     compute_unit_price_micro_lamports: int | None = None,
+    priority_fee_lamports: int | None = None,  # NEW: Direct lamports amount
     as_legacy: bool = False,
     fee_account: str | None = None,
     destination_token_account: str | None = None,
@@ -103,8 +104,20 @@ async def build_swap_tx(
         "wrapAndUnwrapSol": wrap_and_unwrap_sol,
         "dynamicComputeUnitLimit": dynamic_cu_limit,
     }
-    if compute_unit_price_micro_lamports is not None:
+    
+    # Priority fee handling - prefer new API format
+    if priority_fee_lamports is not None:
+        # Use new Jupiter API format
+        body["prioritizationFeeLamports"] = {
+            "priorityLevelWithMaxLamports": {
+                "maxLamports": int(priority_fee_lamports),
+                "priorityLevel": "veryHigh"
+            }
+        }
+    elif compute_unit_price_micro_lamports is not None:
+        # Legacy fallback
         body["computeUnitPriceMicroLamports"] = int(compute_unit_price_micro_lamports)
+    
     if as_legacy:
         body["asLegacyTransaction"] = True
     if fee_account:

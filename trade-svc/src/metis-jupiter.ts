@@ -16,6 +16,7 @@ export type SwapOpts = {
   userPublicKey: string;
   quote: any; // full quote object
   computeUnitPriceMicroLamports?: number;
+  priorityFeeLamports?: number; // NEW: Direct lamports fee for Jupiter API
   asLegacyTransaction?: boolean;
   wrapAndUnwrapSol?: boolean;
   destinationTokenAccount?: string;
@@ -85,7 +86,21 @@ export async function buildSwapTx(opts: SwapOpts): Promise<string> {
     wrapAndUnwrapSol: opts.wrapAndUnwrapSol !== false,
     dynamicComputeUnitLimit: opts.dynamicComputeUnitLimit !== false,
   };
-  if (opts.computeUnitPriceMicroLamports != null) baseBody.computeUnitPriceMicroLamports = opts.computeUnitPriceMicroLamports;
+  
+  // Priority fee handling - prefer new API format
+  if (opts.priorityFeeLamports != null) {
+    // Use new Jupiter API format
+    baseBody.prioritizationFeeLamports = {
+      priorityLevelWithMaxLamports: {
+        maxLamports: opts.priorityFeeLamports,
+        priorityLevel: "veryHigh"
+      }
+    };
+  } else if (opts.computeUnitPriceMicroLamports != null) {
+    // Legacy fallback
+    baseBody.computeUnitPriceMicroLamports = opts.computeUnitPriceMicroLamports;
+  }
+  
   if (opts.asLegacyTransaction) baseBody.asLegacyTransaction = true;
   if (opts.destinationTokenAccount) baseBody.destinationTokenAccount = opts.destinationTokenAccount;
   if (opts.feeAccount) baseBody.feeAccount = opts.feeAccount;
