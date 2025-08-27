@@ -287,6 +287,7 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
 ) = range(8)
 
 (COPY_AWAIT_LEADER, COPY_AWAIT_RATIO, COPY_AWAIT_MAX) = range(8, 11)
+(WITHDRAW_AMOUNT, WITHDRAW_ADDRESS) = range(11, 13)
 
 # ================== UI Helpers ==================
 def back_markup(prev_cb: Optional[str] = None) -> InlineKeyboardMarkup:
@@ -1189,6 +1190,8 @@ async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
             InlineKeyboardButton("🗑️ Delete", callback_data="delete_wallet:solana"),
         ]
     )
+    keyboard_buttons.append([InlineKeyboardButton("📤 Export Private Key", callback_data="export_private_key")])
+    keyboard_buttons.append([InlineKeyboardButton("💸 Withdraw SOL", callback_data="withdraw_sol")])
     keyboard_buttons.append([InlineKeyboardButton("Import Wallet", callback_data="import_wallet")])
     keyboard_buttons.append([InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")])
     await query.edit_message_text("Wallet Options:", reply_markup=InlineKeyboardMarkup(keyboard_buttons))
@@ -1222,6 +1225,264 @@ async def handle_import_wallet(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode="Markdown",
         reply_markup=back_markup("back_to_main_menu"),
     )
+
+async def handle_export_private_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get user wallet
+    wallet_info = database.get_user_wallet(user_id)
+    if not wallet_info.get("address") or not wallet_info.get("private_key"):
+        await query.edit_message_text(
+            "❌ No wallet found. Please create or import a wallet first.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+        return
+    
+    # Security confirmation first
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Export My Private Key", callback_data="confirm_export_pk")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="menu_wallet")]
+    ]
+    await query.edit_message_text(
+        "⚠️ <b>SECURITY WARNING</b>\n\n"
+        "You are about to export your private key.\n"
+        "• Keep it safe and private\n"
+        "• Anyone with this key can access your wallet\n"
+        "• Never share it with anyone\n\n"
+        "Are you sure you want to proceed?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_confirm_export_private_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clear_user_context(context)
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get wallet private key
+    wallet_info = database.get_user_wallet(user_id)
+    private_key = wallet_info.get("private_key")
+    address = wallet_info.get("address")
+    
+    if not private_key or not address:
+        await query.edit_message_text(
+            "❌ Error: Could not retrieve wallet information.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+        return
+    
+    await query.edit_message_text(
+        "🔐 <b>Your Wallet Export</b>\n\n"
+        f"Address:\n<code>{address}</code>\n\n"
+        "⚠️ <b>Private Key (BACKUP & DO NOT SHARE):</b>\n"
+        f"<code>{private_key}</code>\n\n"
+        "💡 <b>Important:</b>\n"
+        "• Save this private key in a secure location\n"
+        "• Never share it with anyone\n"
+        "• This message will be deleted for security",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+    )
+
+async def handle_withdraw_sol_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start withdraw conversation"""
+    clear_user_context(context)
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get user wallet and balance
+    wallet_info = database.get_user_wallet(user_id)
+    if not wallet_info.get("address") or not wallet_info.get("private_key"):
+        await query.edit_message_text(
+            "❌ No wallet found. Please create or import a wallet first.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+        return ConversationHandler.END
+    
+    address = wallet_info.get("address")
+    context.user_data["withdraw_wallet_info"] = wallet_info
+    
+    # Get current SOL balance
+    try:
+        balance = solana_client.get_balance(address)
+        context.user_data["current_balance"] = balance
+        
+        await query.edit_message_text(
+            f"💰 <b>Withdraw SOL</b>\n\n"
+            f"Current Balance: <b>{balance:.6f} SOL</b>\n"
+            f"Wallet: <code>{address}</code>\n\n"
+            "How much SOL do you want to withdraw?\n"
+            "Send a number (e.g., <code>0.5</code>) or <code>all</code> to withdraw everything.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+        )
+        return WITHDRAW_AMOUNT
+    except Exception as e:
+        await query.edit_message_text(
+            f"❌ Error getting balance: {e}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+        return ConversationHandler.END
+
+async def handle_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle amount input"""
+    amount_str = update.message.text.strip()
+    current_balance = context.user_data.get("current_balance", 0)
+    
+    try:
+        if amount_str.lower() == "all":
+            # Reserve some for transaction fee
+            amount = max(0, current_balance - 0.005)
+            if amount <= 0:
+                await update.message.reply_text(
+                    "❌ Insufficient balance for withdrawal (need to reserve for transaction fee).",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+                )
+                return WITHDRAW_AMOUNT
+        else:
+            amount = float(amount_str)
+            if amount <= 0:
+                await update.message.reply_text(
+                    "❌ Amount must be greater than 0.\nPlease send a valid amount or 'all':",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+                )
+                return WITHDRAW_AMOUNT
+            
+            if amount > current_balance:
+                await update.message.reply_text(
+                    f"❌ Insufficient balance. You have {current_balance:.6f} SOL.\nPlease send a valid amount:",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+                )
+                return WITHDRAW_AMOUNT
+        
+        context.user_data["withdraw_amount"] = amount
+        
+        await update.message.reply_text(
+            f"✅ Amount: <b>{amount:.6f} SOL</b>\n\n"
+            "Now send the destination address:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+        )
+        return WITHDRAW_ADDRESS
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid amount. Please enter a number or 'all':",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+        )
+        return WITHDRAW_AMOUNT
+
+async def handle_withdraw_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle address input and execute withdrawal"""
+    to_addr = update.message.text.strip()
+    amount = context.user_data.get("withdraw_amount")
+    wallet_info = context.user_data.get("withdraw_wallet_info")
+    
+    if not wallet_info or not amount:
+        await update.message.reply_text(
+            "❌ Session expired. Please start over.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+        return ConversationHandler.END
+    
+    private_key = wallet_info.get("private_key")
+    
+    # Validate address format (basic check)
+    if len(to_addr) < 32 or len(to_addr) > 44:
+        await update.message.reply_text(
+            "❌ Invalid address format. Please send a valid Solana address:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]])
+        )
+        return WITHDRAW_ADDRESS
+    
+    # Show confirmation
+    keyboard = [
+        [InlineKeyboardButton("✅ Confirm Withdrawal", callback_data="withdraw_confirm")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="withdraw_cancel")]
+    ]
+    
+    await update.message.reply_text(
+        f"🔍 <b>Confirm Withdrawal</b>\n\n"
+        f"Amount: <b>{amount:.6f} SOL</b>\n"
+        f"To: <code>{to_addr}</code>\n"
+        f"Estimated Fee: ~0.005 SOL\n\n"
+        "Are you sure you want to proceed?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+    context.user_data["withdraw_to_address"] = to_addr
+    return WITHDRAW_ADDRESS
+
+async def handle_withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Execute the withdrawal"""
+    query = update.callback_query
+    await query.answer()
+    
+    amount = context.user_data.get("withdraw_amount")
+    to_addr = context.user_data.get("withdraw_to_address")
+    wallet_info = context.user_data.get("withdraw_wallet_info")
+    
+    if not wallet_info or not amount or not to_addr:
+        await query.edit_message_text(
+            "❌ Session expired. Please start over.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+        return ConversationHandler.END
+    
+    private_key = wallet_info.get("private_key")
+    
+    # Execute withdrawal
+    await query.edit_message_text("⏳ Processing withdrawal...", parse_mode="HTML")
+    
+    result = solana_client.send_sol(private_key, to_addr, amount)
+    
+    if result.startswith("Error"):
+        await query.edit_message_text(
+            f"❌ <b>Withdrawal Failed</b>\n\n{result}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+    else:
+        await query.edit_message_text(
+            f"✅ <b>Withdrawal Successful!</b>\n\n"
+            f"Amount: <b>{amount:.6f} SOL</b>\n"
+            f"To: <code>{to_addr}</code>\n"
+            f"Transaction: <code>{result}</code>\n\n"
+            f"🔗 <a href='https://solscan.io/tx/{result}'>View on Solscan</a>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+        )
+    
+    # Clear context
+    context.user_data.pop("withdraw_amount", None)
+    context.user_data.pop("withdraw_to_address", None)
+    context.user_data.pop("withdraw_wallet_info", None)
+    context.user_data.pop("current_balance", None)
+    
+    return ConversationHandler.END
+
+async def handle_withdraw_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel withdrawal"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Clear context
+    context.user_data.pop("withdraw_amount", None)
+    context.user_data.pop("withdraw_to_address", None)
+    context.user_data.pop("withdraw_wallet_info", None)
+    context.user_data.pop("current_balance", None)
+    
+    await query.edit_message_text(
+        "❌ Withdrawal cancelled.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Wallet", callback_data="menu_wallet")]])
+    )
+    return ConversationHandler.END
 
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -2440,6 +2701,27 @@ def main() -> None:
     )
     application.add_handler(cu_settings_conv_handler)
 
+    # --- Withdraw SOL conversation ---
+    withdraw_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(handle_withdraw_sol_start, pattern="^withdraw_sol$")],
+        states={
+            WITHDRAW_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_withdraw_amount),
+                CallbackQueryHandler(handle_withdraw_cancel, pattern="^withdraw_cancel$"),
+            ],
+            WITHDRAW_ADDRESS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_withdraw_address),
+                CallbackQueryHandler(handle_withdraw_confirm, pattern="^withdraw_confirm$"),
+                CallbackQueryHandler(handle_withdraw_cancel, pattern="^withdraw_cancel$"),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(handle_withdraw_cancel, pattern="^withdraw_cancel$"),
+            CallbackQueryHandler(handle_wallet_menu, pattern="^menu_wallet$"),
+        ],
+    )
+    application.add_handler(withdraw_conv_handler)
+
     # --- Copy menu & item actions (once only) ---
     application.add_handler(CallbackQueryHandler(handle_copy_menu, pattern="^copy_menu$"))
     application.add_handler(CallbackQueryHandler(handle_copy_toggle, pattern=r"^copy_toggle:.+$"))
@@ -2463,6 +2745,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern="^back_to_main_menu$"))
     application.add_handler(CallbackQueryHandler(handle_import_wallet, pattern="^import_wallet$"))
     application.add_handler(CallbackQueryHandler(handle_delete_wallet, pattern=r"^delete_wallet:solana$"))
+    application.add_handler(CallbackQueryHandler(handle_export_private_key, pattern="^export_private_key$"))
+    application.add_handler(CallbackQueryHandler(handle_confirm_export_private_key, pattern="^confirm_export_pk$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
     # Settings handlers
     application.add_handler(CallbackQueryHandler(handle_menu_settings, pattern=r"^menu_settings$"))
