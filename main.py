@@ -2927,9 +2927,12 @@ async def _handle_trade_response(
         except:
             success_msg = "✅ Swap successful!"
             
-        # Edit the loading message instead of creating a new one
+        # Clean up all tracked messages except the loading message (which we'll edit)
         loading_msg_id = context.user_data.get("loading_message_id")
         if loading_msg_id:
+            # Delete other tracked messages first (like token panel, etc.)
+            await delete_all_bot_messages_except_current(context, message.chat_id, loading_msg_id)
+            
             try:
                 extra = ""
                 if sig:
@@ -2949,6 +2952,8 @@ async def _handle_trade_response(
                 # Fallback to reply if edit fails
                 await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
         else:
+            # Clean up all tracked messages before showing success
+            await delete_all_bot_messages(context, message.chat_id)
             await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
         
         context.user_data.pop("loading_message_id", None)
@@ -3140,9 +3145,12 @@ async def perform_trade(
         except:
             error_msg = f"❌ An unexpected error occurred: {short_err_text(str(e))}"
             
-        # Edit the loading message instead of creating a new one
+        # Clean up all tracked messages except the loading message (which we'll edit)
         loading_msg_id = context.user_data.get("loading_message_id")
         if loading_msg_id:
+            # Delete other tracked messages first (like token panel, etc.)
+            await delete_all_bot_messages_except_current(context, message.chat_id, loading_msg_id)
+            
             try:
                 await context.bot.edit_message_text(
                     chat_id=message.chat_id,
@@ -3155,6 +3163,8 @@ async def perform_trade(
                 # Fallback to reply if edit fails
                 await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         else:
+            # Clean up all tracked messages before showing error
+            await delete_all_bot_messages(context, message.chat_id)
             await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         
         context.user_data.pop("loading_message_id", None)
