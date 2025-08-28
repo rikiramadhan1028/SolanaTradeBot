@@ -50,7 +50,17 @@ cu_price = choose_cu_price(os.getenv("PRIORITY_TIER"))
 def get_user_cu_price(user_id: str) -> Optional[int]:
     """Get CU price for specific user, with fallback to global default."""
     user_cu = UserSettings.get_user_cu_price(str(user_id))
-    return user_cu if user_cu is not None else cu_price
+    # If user has explicitly set OFF (None/0), respect that choice
+    # Only use global default if no user preference is stored at all
+    if user_cu is not None:
+        return user_cu if user_cu > 0 else None  # Treat 0 as None/OFF
+    # Check if user has any stored preference (including OFF)
+    user_settings = UserSettings.get_user_settings_summary(str(user_id))
+    if 'cu_price' in user_settings:
+        # User has a stored preference, even if it's None/OFF
+        return None
+    # No stored preference at all, use global default
+    return cu_price
 
 def get_user_priority_tier(user_id: str) -> Optional[str]:
     """Get user's priority tier from database settings."""
@@ -59,8 +69,14 @@ def get_user_priority_tier(user_id: str) -> Optional[str]:
     if tier:
         return tier
     
-    # Fallback: Map from legacy CU price setting
-    user_cu = get_user_cu_price(user_id)
+    # Check if user has explicitly chosen OFF
+    user_settings = UserSettings.get_user_settings_summary(str(user_id))
+    if 'priority_tier' in user_settings and user_settings['priority_tier'] is None:
+        # User explicitly set OFF
+        return None
+    
+    # Fallback: Map from legacy CU price setting (avoid recursion)
+    user_cu = UserSettings.get_user_cu_price(str(user_id))
     if user_cu is None or user_cu == 0:
         return None
     elif user_cu == DEX_CU_PRICE_MICRO_FAST:
@@ -1155,6 +1171,43 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
             
     except Exception as e:
         await q.message.reply_text(f"❌ Error sharing PnL: {str(e)}")
+
+async def handle_trade(q, context: ContextTypes.DEFAULT_TYPE):
+    """Handle trade button from assets view - navigate to token panel for specific token"""
+    await q.answer()
+    user_id = q.from_user.id
+    
+    # Get the token mint from context
+    mint = context.user_data.get("trade_mint")
+    if not mint:
+        await q.edit_message_text(
+            "❌ No token selected for trading.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back to Assets", callback_data="view_assets")
+            ]])
+        )
+        return
+    
+    # Set token address in context for trading flow
+    context.user_data["token_address"] = mint
+    
+    try:
+        # Build and display token panel
+        panel = await build_token_panel(user_id, mint)
+        await q.edit_message_text(
+            panel, 
+            reply_markup=token_panel_keyboard(context), 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Error building token panel for {mint}: {e}")
+        await q.edit_message_text(
+            f"❌ Error loading token information.\n\nToken: <code>{mint}</code>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back to Assets", callback_data="view_assets")
+            ]]),
+            parse_mode="HTML"
+        )
 
 async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
     """Share full portfolio summary with CEX-like interface"""
