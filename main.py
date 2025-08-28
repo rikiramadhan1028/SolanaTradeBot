@@ -309,9 +309,20 @@ solana_client = SolanaClient(config.SOLANA_RPC_URL)
 
 # ================== Message Cleanup Helpers ==================
 async def delete_user_message(update: Update) -> None:
-    """Auto-delete user input message to keep chat clean"""
+    """Auto-delete user input message to keep chat clean - DEPRECATED, use delete_sensitive_user_message"""
     try:
         await update.message.delete()
+    except Exception:
+        pass
+
+async def delete_sensitive_user_message(update: Update) -> None:
+    """Delete user message only if it contains sensitive data like private keys"""
+    try:
+        message_text = update.message.text or ""
+        # Only delete if message contains sensitive information
+        if ("import" in message_text.lower() and len(message_text) > 20) or \
+           any(word in message_text.lower() for word in ["private", "secret", "key"]):
+            await update.message.delete()
     except Exception:
         pass
 
@@ -328,13 +339,51 @@ async def delete_previous_bot_message(context: ContextTypes.DEFAULT_TYPE, chat_i
             pass
 
 async def store_bot_message(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> None:
-    """Store bot message ID for later cleanup"""
+    """Store bot message ID for later cleanup - DEPRECATED, use track_bot_message"""
     context.user_data["last_bot_message_id"] = message_id
+    await track_bot_message(context, message_id)
 
 async def clear_message_context(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear all message-related context data"""
     context.user_data.pop("last_bot_message_id", None)
     context.user_data.pop("last_bot_message", None)
+    context.user_data.pop("bot_messages_to_delete", None)
+
+async def delete_all_bot_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Delete all bot messages tracked in context"""
+    try:
+        bot = context.bot
+        
+        # Delete the last bot message
+        if context.user_data.get("last_bot_message_id"):
+            try:
+                await bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=context.user_data["last_bot_message_id"]
+                )
+            except:
+                pass
+        
+        # Delete all tracked bot messages
+        bot_messages = context.user_data.get("bot_messages_to_delete", [])
+        for message_id in bot_messages:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except:
+                pass
+                
+        # Clear the tracking
+        await clear_message_context(context)
+    except Exception as e:
+        print(f"Error deleting bot messages: {e}")
+
+async def track_bot_message(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> None:
+    """Track bot message for automatic deletion"""
+    if "bot_messages_to_delete" not in context.user_data:
+        context.user_data["bot_messages_to_delete"] = []
+    context.user_data["bot_messages_to_delete"].append(message_id)
+    # Also store as last message for backward compatibility
+    context.user_data["last_bot_message_id"] = message_id
 
 async def safe_edit_message(query, text: str, **kwargs):
     """Safely edit message and store ID for cleanup"""
@@ -581,6 +630,11 @@ def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
     if hasattr(context, "user_data"):
         context.user_data.clear()
 
+async def clear_user_context_with_cleanup(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Clear user context and delete all bot messages"""
+    await delete_all_bot_messages(context, chat_id)
+    clear_user_context(context)
+
 def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -808,14 +862,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        q = update.callback_query
-        await q.answer()
+    q = update.callback_query
+    await q.answer()
+    chat_id = update.effective_chat.id
+    
+    # Delete all bot messages before navigating to assets view
+    await clear_user_context_with_cleanup(context, chat_id)
+    
     # init state default agar tidak menyaring dust & tampilkan detail
-        context.user_data.setdefault("assets_state", {
+    context.user_data.setdefault("assets_state", {
         "page": 1, "sort": "value", "hide_dust": False,
         "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
     })
-        await _render_assets_detailed_view(q, context)
+    await _render_assets_detailed_view(q, context)
 
 
 async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_TYPE):
@@ -1307,7 +1366,11 @@ async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
 async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
+    chat_id = update.effective_chat.id
     user_id = q.from_user.id
+    
+    # Delete all bot messages before navigating to copy trading menu
+    await clear_user_context_with_cleanup(context, chat_id)
 
     follows = database.copy_follow_list_for_user(user_id) or []
     rows = []
@@ -1441,13 +1504,12 @@ async def copy_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return COPY_AWAIT_LEADER
 
 async def copy_add_leader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Auto-delete user input message
-    await delete_user_message(update)
+    # Keep user message visible for transparency
     
     leader = (update.message.text or "").strip()
     if not _is_pubkey(leader):
         response = await update.message.reply_html("❌ Invalid pubkey. Please try again.", reply_markup=back_markup("copy_menu"))
-        await store_bot_message(context, response.message_id)
+        await track_bot_message(context, response.message_id)
         return COPY_AWAIT_LEADER
     context.user_data["copy_leader"] = leader
     
@@ -1458,12 +1520,11 @@ async def copy_add_leader(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "✅ Leader accepted.\n\nNow send the <b>ratio</b> (e.g. <code>1</code> for 1:1, <code>0.5</code> for half).",
         reply_markup=back_markup("copy_menu"),
     )
-    await store_bot_message(context, response.message_id)
+    await track_bot_message(context, response.message_id)
     return COPY_AWAIT_RATIO
 
 async def copy_add_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Auto-delete user input message
-    await delete_user_message(update)
+    # Keep user message visible for transparency
     
     try:
         ratio = float((update.message.text or "").strip())
@@ -1487,8 +1548,7 @@ async def copy_add_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return COPY_AWAIT_MAX
 
 async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Auto-delete user input message
-    await delete_user_message(update)
+    # Keep user message visible for transparency
     
     try:
         max_sol = float((update.message.text or "").strip())
@@ -1521,9 +1581,12 @@ async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     
 
 async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)
     query = update.callback_query
     await query.answer()
+    chat_id = update.effective_chat.id
+    
+    # Delete all bot messages before navigating
+    await clear_user_context_with_cleanup(context, chat_id)
     keyboard_buttons = []
     keyboard_buttons.append(
         [
@@ -1906,7 +1969,7 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if command == "import":
         # Auto-delete user message containing private key for security
-        await delete_user_message(update)
+        await delete_sensitive_user_message(update)
         
         if len(args) == 0:
             await update.message.reply_text(
@@ -2091,9 +2154,13 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)
     query = update.callback_query
     await query.answer()
+    chat_id = update.effective_chat.id
+    
+    # Delete all bot messages before navigating
+    await clear_user_context_with_cleanup(context, chat_id)
+    
     user_id = query.from_user.id
     user_mention = query.from_user.mention_html()
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
@@ -2281,8 +2348,7 @@ async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT
 
 async def handle_custom_cu_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle custom CU price input."""
-    # Auto-delete user input message
-    await delete_user_message(update)
+    # Keep user message visible for transparency
     
     if not context.user_data.get("awaiting_custom_cu"):
         return SET_CU_PRICE
@@ -2348,9 +2414,12 @@ async def handle_send_asset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== Trading flows ==================
 async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    clear_user_context(context)
     query = update.callback_query
     await query.answer()
+    chat_id = update.effective_chat.id
+    
+    # Delete all bot messages before navigating
+    await clear_user_context_with_cleanup(context, chat_id)
 
     keyboard = [
         [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
@@ -2446,8 +2515,7 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
     return AWAITING_TRADE_ACTION
 
 async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Auto-delete user input message
-    await delete_user_message(update)
+    # Keep user message visible for transparency
     
     try:
         amount = float(update.message.text.strip())
