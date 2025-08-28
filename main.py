@@ -2580,7 +2580,7 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
             buffer_ui = choose_priority_fee_sol(user_priority_tier)
         else:
             user_cu_price = get_user_cu_price(user_id)
-            if user_cu_price > 0:
+            if user_cu_price and user_cu_price > 0:
                 from cu_config import cu_to_sol_priority_fee
                 buffer_ui = cu_to_sol_priority_fee(user_cu_price, 200000)
             else:
