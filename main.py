@@ -1228,9 +1228,7 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
     addr = (w or {}).get("address")
     
     if not addr:
-        response = await q.message.reply_text("❌ No wallet found")
-        if context:
-            await track_bot_message(context, response.message_id)
+        await q.message.reply_text("❌ No wallet found")
         return
     
     try:
@@ -1333,9 +1331,7 @@ async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
     addr = (w or {}).get("address")
     
     if not addr:
-        response = await q.message.reply_text("❌ No wallet found")
-        if context:
-            await track_bot_message(context, response.message_id)
+        await q.message.reply_text("❌ No wallet found")
         return
     
     try:
@@ -2782,6 +2778,7 @@ async def _handle_trade_response(
     pre_sol_ui: float,
     pre_token_ui: float,
     prev_cb: str = "back_to_token_panel",   # <-- default aman
+    context: ContextTypes.DEFAULT_TYPE = None,
 ) -> bool:  # Return True if successful, False if failed
     if isinstance(res, dict) and (res.get("signature") or res.get("bundle")):
         # ==== update posisi (buy/sell) ====
@@ -2959,6 +2956,7 @@ async def perform_trade(
             pre_sol_ui=pre_sol_ui,
             pre_token_ui=pre_token_ui,
             prev_cb=prev_cb,
+            context=context,
         )
 
         # fee SELL (pasca-swap)
