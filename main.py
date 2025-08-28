@@ -2828,11 +2828,29 @@ async def _handle_trade_response(
                 pass
 
         sig = res.get("signature") or res.get("bundle")
-        await reply_ok_html(message, "✅ Swap successful!", prev_cb=prev_cb, signature=sig, context=context)
+        
+        # Get token symbol for better display
+        try:
+            meta = await MetaCache.get(token_mint)
+            token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+            success_msg = f"✅ {trade_type.capitalize()} {token_symbol} successful!"
+        except:
+            success_msg = "✅ Swap successful!"
+            
+        await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
         return True
     else:
         err = res.get("error") if isinstance(res, dict) else res
-        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb=prev_cb, context=context)
+        
+        # Get token symbol for better display in error message
+        try:
+            meta = await MetaCache.get(token_mint)
+            token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+            error_msg = f"❌ {trade_type.capitalize()} {token_symbol} failed: {short_err_text(str(err))}"
+        except:
+            error_msg = f"❌ Swap failed: {short_err_text(str(err))}"
+            
+        await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         return False
 
 
@@ -2890,9 +2908,17 @@ async def perform_trade(
         await reply_err_html(message, prep["message"], prev_cb=prev_cb, context=context)
         return False
 
+    # Get token symbol for better display in loading message
+    try:
+        meta = await MetaCache.get(token_mint)
+        token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+        loading_msg = f"⏳ Performing {trade_type} on {token_symbol} via {selected_dex.capitalize()}…"
+    except:
+        loading_msg = f"⏳ Performing {trade_type} on `{token_mint}` via {selected_dex.capitalize()}…"
+    
     await reply_ok_html(
         message,
-        f"⏳ Performing {trade_type} on `{token_mint}` via {selected_dex.capitalize()}…",
+        loading_msg,
         prev_cb=prev_cb,
         context=context,
     )
@@ -2973,9 +2999,17 @@ async def perform_trade(
         return success
 
     except Exception as e:
+        # Get token symbol for better display in error message
+        try:
+            meta = await MetaCache.get(token_mint)
+            token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+            error_msg = f"❌ {trade_type.capitalize()} {token_symbol} failed: {short_err_text(str(e))}"
+        except:
+            error_msg = f"❌ An unexpected error occurred: {short_err_text(str(e))}"
+            
         await reply_err_html(
             message,
-            f"❌ An unexpected error occurred: {short_err_text(str(e))}",
+            error_msg,
             prev_cb=prev_cb,
             context=context,
         )
