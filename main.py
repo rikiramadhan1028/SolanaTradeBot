@@ -514,7 +514,6 @@ async def reply_ok_html(message, text: str, prev_cb: str | None = None, signatur
         await track_bot_message(context, response.message_id)
         # Schedule automatic cleanup for success messages after 5 minutes
         if text.startswith("✅"):
-            import asyncio
             chat_id = message.chat_id
             asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
     return response
@@ -725,7 +724,6 @@ async def clear_user_context_with_cleanup(context: ContextTypes.DEFAULT_TYPE, ch
 
 async def auto_cleanup_success_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay_minutes: int = 5):
     """Schedule automatic cleanup of success messages after delay"""
-    import asyncio
     await asyncio.sleep(delay_minutes * 60)  # Convert minutes to seconds
     try:
         bot = context.bot
@@ -1844,7 +1842,6 @@ async def handle_confirm_export_private_key(update: Update, context: ContextType
     )
     
     # Auto-delete after 2 minutes for security
-    import asyncio
     async def delayed_delete():
         await asyncio.sleep(120)  # 2 minutes
         try:
@@ -2947,7 +2944,6 @@ async def _handle_trade_response(
                 )
                 
                 # Schedule cleanup for success messages
-                import asyncio
                 asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, loading_msg_id, 5))
             except Exception:
                 # Fallback to reply if edit fails
