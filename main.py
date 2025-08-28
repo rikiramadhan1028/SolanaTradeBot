@@ -144,9 +144,11 @@ async def handle_admin_user_stats(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_html(stats_msg)
         
     except ImportError:
-        await update.message.reply_html("❌ MongoDB database not available.")
+        response = await update.message.reply_html("❌ MongoDB database not available.")
+        await track_bot_message(context, response.message_id)
     except Exception as e:
-        await update.message.reply_html(f"❌ Error getting user stats: {e}")
+        response = await update.message.reply_html(f"❌ Error getting user stats: {e}")
+        await track_bot_message(context, response.message_id)
 
 # CU Settings conversation states
 SET_CU_PRICE = 1
@@ -385,6 +387,24 @@ async def track_bot_message(context: ContextTypes.DEFAULT_TYPE, message_id: int)
     # Also store as last message for backward compatibility
     context.user_data["last_bot_message_id"] = message_id
 
+async def auto_reply_html(message, text: str, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+    """Reply with HTML and automatically track the message for deletion"""
+    response = await message.reply_html(text, **kwargs)
+    await track_bot_message(context, response.message_id)
+    return response
+
+async def auto_reply_text(message, text: str, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+    """Reply with text and automatically track the message for deletion"""
+    response = await message.reply_text(text, **kwargs)
+    await track_bot_message(context, response.message_id)
+    return response
+
+async def auto_edit_message_text(query, text: str, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+    """Edit message text and automatically track the message for deletion"""
+    await query.edit_message_text(text, **kwargs)
+    await track_bot_message(context, query.message.message_id)
+    return query
+
 async def safe_edit_message(query, text: str, **kwargs):
     """Safely edit message and store ID for cleanup"""
     try:
@@ -428,14 +448,20 @@ def short_err_text(err: str) -> str:
         return "Aggregator error."
     return (s[:200] + "…") if len(s) > 200 else s
 
-async def reply_ok_html(message, text: str, prev_cb: str | None = None, signature: str | None = None):
+async def reply_ok_html(message, text: str, prev_cb: str | None = None, signature: str | None = None, context: ContextTypes.DEFAULT_TYPE = None):
     extra = ""
     if signature:
         extra = f'\n🔗 <a href="{solscan_tx(signature)}">Solscan</a>\n<code>{signature}</code>'
-    await message.reply_html(text + extra, reply_markup=back_markup(prev_cb))
+    response = await message.reply_html(text + extra, reply_markup=back_markup(prev_cb))
+    if context:
+        await track_bot_message(context, response.message_id)
+    return response
 
-async def reply_err_html(message, text: str, prev_cb: str | None = None):
-    await message.reply_html(text, reply_markup=back_markup(prev_cb))
+async def reply_err_html(message, text: str, prev_cb: str | None = None, context: ContextTypes.DEFAULT_TYPE = None):
+    response = await message.reply_html(text, reply_markup=back_markup(prev_cb))
+    if context:
+        await track_bot_message(context, response.message_id)
+    return response
 
 def _is_valid_pubkey(addr: str) -> bool:
     if not addr or not isinstance(addr, str) or not (32 <= len(addr) <= 44):
@@ -1172,7 +1198,9 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
     addr = (w or {}).get("address")
     
     if not addr:
-        await q.message.reply_text("❌ No wallet found")
+        response = await q.message.reply_text("❌ No wallet found")
+        if context:
+            await track_bot_message(context, response.message_id)
         return
     
     try:
@@ -1275,7 +1303,9 @@ async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
     addr = (w or {}).get("address")
     
     if not addr:
-        await q.message.reply_text("❌ No wallet found")
+        response = await q.message.reply_text("❌ No wallet found")
+        if context:
+            await track_bot_message(context, response.message_id)
         return
     
     try:
@@ -2726,16 +2756,16 @@ async def _handle_trade_response(
                 )
         except Exception as e:
             try:
-                await reply_err_html(message, f"⚠️ Position update failed: {e}", prev_cb=prev_cb)
+                await reply_err_html(message, f"⚠️ Position update failed: {e}", prev_cb=prev_cb, context=context)
             except Exception:
                 pass
 
         sig = res.get("signature") or res.get("bundle")
-        await reply_ok_html(message, "✅ Swap successful!", prev_cb=prev_cb, signature=sig)
+        await reply_ok_html(message, "✅ Swap successful!", prev_cb=prev_cb, signature=sig, context=context)
         return True
     else:
         err = res.get("error") if isinstance(res, dict) else res
-        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb=prev_cb)
+        await reply_err_html(message, f"❌ Swap failed: {short_err_text(str(err))}", prev_cb=prev_cb, context=context)
         return False
 
 
@@ -2759,6 +2789,7 @@ async def perform_trade(
             message,
             "❌ No Solana wallet found. Please create or import one first.",
             prev_cb=prev_cb,
+            context=context,
         )
         return False
 
@@ -2770,7 +2801,7 @@ async def perform_trade(
     sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
 
     if not token_mint:
-        await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu")
+        await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu", context=context)
         return False
 
     # snapshot pra-trade
@@ -2789,13 +2820,14 @@ async def perform_trade(
             pre_sol_ui = float(prep["pre_sol_ui"])
 
     if prep.get("status") == "error":
-        await reply_err_html(message, prep["message"], prev_cb=prev_cb)
+        await reply_err_html(message, prep["message"], prev_cb=prev_cb, context=context)
         return False
 
     await reply_ok_html(
         message,
         f"⏳ Performing {trade_type} on `{token_mint}` via {selected_dex.capitalize()}…",
         prev_cb=prev_cb,
+        context=context,
     )
 
     # eksekusi
@@ -2877,6 +2909,7 @@ async def perform_trade(
             message,
             f"❌ An unexpected error occurred: {short_err_text(str(e))}",
             prev_cb=prev_cb,
+            context=context,
         )
         return False
     finally:
