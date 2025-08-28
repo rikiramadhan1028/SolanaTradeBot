@@ -427,6 +427,20 @@ async def auto_reply_text(message, text: str, context: ContextTypes.DEFAULT_TYPE
     await track_bot_message(context, response.message_id)
     return response
 
+async def safe_reply_text(message, text: str, context: ContextTypes.DEFAULT_TYPE = None, **kwargs):
+    """Safe reply with automatic tracking - use this instead of direct reply_text"""
+    response = await message.reply_text(text, **kwargs)
+    if context:
+        await track_bot_message(context, response.message_id)
+    return response
+
+async def safe_reply_html(message, text: str, context: ContextTypes.DEFAULT_TYPE = None, **kwargs):
+    """Safe reply with automatic tracking - use this instead of direct reply_html"""
+    response = await message.reply_html(text, **kwargs)
+    if context:
+        await track_bot_message(context, response.message_id)
+    return response
+
 async def auto_edit_message_text(query, text: str, context: ContextTypes.DEFAULT_TYPE, **kwargs):
     """Edit message text and automatically track the message for deletion"""
     await query.edit_message_text(text, **kwargs)
@@ -483,6 +497,11 @@ async def reply_ok_html(message, text: str, prev_cb: str | None = None, signatur
     response = await message.reply_html(text + extra, reply_markup=back_markup(prev_cb))
     if context:
         await track_bot_message(context, response.message_id)
+        # Schedule automatic cleanup for success messages after 5 minutes
+        if text.startswith("✅"):
+            import asyncio
+            chat_id = message.chat_id
+            asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
     return response
 
 async def reply_err_html(message, text: str, prev_cb: str | None = None, context: ContextTypes.DEFAULT_TYPE = None):
@@ -688,6 +707,28 @@ async def clear_user_context_with_cleanup(context: ContextTypes.DEFAULT_TYPE, ch
     """Clear user context and delete all bot messages"""
     await delete_all_bot_messages(context, chat_id)
     clear_user_context(context)
+
+async def auto_cleanup_success_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay_minutes: int = 5):
+    """Schedule automatic cleanup of success messages after delay"""
+    import asyncio
+    await asyncio.sleep(delay_minutes * 60)  # Convert minutes to seconds
+    try:
+        bot = context.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass  # Message might already be deleted
+
+async def ensure_message_cleanup_on_user_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Cleanup all bot messages when user performs any action"""
+    await delete_all_bot_messages(context, chat_id)
+
+async def handle_callback_with_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE, handler_func):
+    """Universal callback handler that cleans up messages before executing the actual handler"""
+    chat_id = update.effective_chat.id
+    # Don't cleanup immediately for callback queries to avoid deleting the message being interacted with
+    # Just clean up old messages, let the handler manage the current message
+    await delete_all_bot_messages_except_current(context, chat_id, update.callback_query.message.message_id)
+    return await handler_func(update, context)
 
 def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
@@ -913,7 +954,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_mention = update.effective_user.mention_html()
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
-    await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
+    response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
+    await track_bot_message(context, response.message_id)
 
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -1098,7 +1140,7 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         indicator = "📈" if (pnl_pct is not None and pnl_pct >= 0) else ("📉" if pnl_pct is not None else "📊")
         danger = "🟩" if (pnl_pct is not None and pnl_pct >= 0) else ("🟥" if pnl_pct is not None else "")
 
-        lines.append(f"<b><a href='tg://callback?data=trade_{mint}'>${sym}</a></b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
+        lines.append(f"<b>${sym}</b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
                      f"[<a href='tg://callback?data=assets_hide_{mint}'>hide</a>]")  # label saja, tombol real di bawah
         lines.append(f"<code>{mint}</code>")
         if pnl_pct is not None:
@@ -1138,10 +1180,15 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         InlineKeyboardButton("📸 Share Portfolio", callback_data="assets_share_portfolio"),
     ]
     row2 = [b for b in (prev_btn, InlineKeyboardButton("↻ Refresh", callback_data="assets_refresh"), next_btn) if b]
-    # baris tombol contextual per kartu tidak bisa inline per baris di teks HTML,
-    # jadi kita sediakan “Hide / Share” via callback per-mint di bawah sebagai baris tambahan:
-    # Remove individual card buttons since we now use inline links
+    # Add individual trade buttons for each token
     card_buttons = []
+    for x in page_items:
+        mint = x["mint"]
+        sym = x["symbol"]
+        card_buttons.append([
+            InlineKeyboardButton(f"📈 Trade ${sym}", callback_data=f"trade_{mint}"),
+            InlineKeyboardButton(f"📊 Share ${sym}", callback_data=f"assets_share_pnl_{mint}"),
+        ])
 
     back = [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
 
@@ -1495,34 +1542,40 @@ async def handle_copy_text_commands(update: Update, context: ContextTypes.DEFAUL
     if cmd == "copyadd" and len(parts) >= 4:
         leader = parts[1].strip()
         if not _is_pubkey(leader):
-            await update.message.reply_html("❌ Invalid leader pubkey.", reply_markup=back_markup("back_to_main_menu"))
+            response = await update.message.reply_html("❌ Invalid leader pubkey.", reply_markup=back_markup("back_to_main_menu"))
+            await track_bot_message(context, response.message_id)
             return
         try:
             ratio = float(parts[2])
             max_sol = float(parts[3])
         except Exception:
-            await update.message.reply_html("❌ Usage: <code>copyadd LEADER_PUBKEY RATIO MAX_SOL</code>", reply_markup=back_markup("back_to_main_menu"))
+            response = await update.message.reply_html("❌ Usage: <code>copyadd LEADER_PUBKEY RATIO MAX_SOL</code>", reply_markup=back_markup("back_to_main_menu"))
+            await track_bot_message(context, response.message_id)
             return
         database.copy_follow_upsert(user_id, leader, ratio=ratio, max_sol_per_trade=max_sol, active=True)
-        await update.message.reply_html("✅ Copy-follow added/updated.", reply_markup=back_markup("back_to_main_menu"))
+        response = await update.message.reply_html("✅ Copy-follow added/updated.", reply_markup=back_markup("back_to_main_menu"))
+        await track_bot_message(context, response.message_id)
         return
 
     if cmd == "copyon" and len(parts) == 2:
         leader = parts[1].strip()
         database.copy_follow_upsert(user_id, leader, active=True)
-        await update.message.reply_html("✅ Copy-follow turned ON.", reply_markup=back_markup("back_to_main_menu"))
+        response = await update.message.reply_html("✅ Copy-follow turned ON.", reply_markup=back_markup("back_to_main_menu"))
+        await track_bot_message(context, response.message_id)
         return
 
     if cmd == "copyoff" and len(parts) == 2:
         leader = parts[1].strip()
         database.copy_follow_upsert(user_id, leader, active=False)
-        await update.message.reply_html("✅ Copy-follow turned OFF.", reply_markup=back_markup("back_to_main_menu"))
+        response = await update.message.reply_html("✅ Copy-follow turned OFF.", reply_markup=back_markup("back_to_main_menu"))
+        await track_bot_message(context, response.message_id)
         return
 
     if cmd == "copyrm" and len(parts) == 2:
         leader = parts[1].strip()
         database.copy_follow_remove(user_id, leader)
-        await update.message.reply_html("🗑️ Copy-follow removed.", reply_markup=back_markup("back_to_main_menu"))
+        response = await update.message.reply_html("🗑️ Copy-follow removed.", reply_markup=back_markup("back_to_main_menu"))
+        await track_bot_message(context, response.message_id)
         return
 
 async def handle_copy_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1832,6 +1885,10 @@ async def handle_withdraw_sol_start(update: Update, context: ContextTypes.DEFAUL
 
 async def handle_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle amount input"""
+    # Clean up bot messages on user text input
+    chat_id = update.effective_chat.id
+    await ensure_message_cleanup_on_user_action(context, chat_id)
+    
     amount_str = update.message.text.strip()
     current_balance = context.user_data.get("current_balance", 0)
     
@@ -2038,6 +2095,10 @@ async def handle_withdraw_cancel(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Clean up bot messages on any user text input
+    chat_id = update.effective_chat.id
+    await ensure_message_cleanup_on_user_action(context, chat_id)
+    
     user_id = update.effective_user.id
     text = update.message.text.strip().replace("\n", " ")
     command, *args = text.split(maxsplit=1)
@@ -2554,7 +2615,8 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
     context.user_data.setdefault("slippage_bps_sell", 500)  # 5%
 
     panel = await build_token_panel(update.effective_user.id, token_address)
-    await message.reply_html(panel, reply_markup=token_panel_keyboard(context))
+    response = await message.reply_html(panel, reply_markup=token_panel_keyboard(context))
+    await track_bot_message(context, response.message_id)
     return AWAITING_TRADE_ACTION
 
 async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2611,7 +2673,9 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
     return AWAITING_TRADE_ACTION
 
 async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Keep user message visible for transparency
+    # Clean up bot messages on user text input
+    chat_id = update.effective_chat.id
+    await ensure_message_cleanup_on_user_action(context, chat_id)
     
     try:
         amount = float(update.message.text.strip())
@@ -3049,13 +3113,15 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
             f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.",
             reply_markup=token_panel_keyboard(context),
         )
-        await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
+        response = await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
+        await track_bot_message(context, response.message_id)
         return AWAITING_TRADE_ACTION
     except Exception:
-        await update.message.reply_text(
+        response = await update.message.reply_text(
             "❌ Invalid number. Enter % like `5` or `18`.",
             reply_markup=back_markup("back_to_token_panel"),
         )
+        await track_bot_message(context, response.message_id)
         return SET_SLIPPAGE
 
 # ================== Pump.fun Trading Flow (NEW & COMPLETE) ==================
@@ -3101,7 +3167,8 @@ async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEF
         ],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ]
-    await message.reply_html(panel_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    response = await message.reply_html(panel_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await track_bot_message(context, response.message_id)
     return PUMPFUN_AWAITING_ACTION
 
 async def pumpfun_handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3173,6 +3240,10 @@ async def pumpfun_handle_buy_amount(update: Update, context: ContextTypes.DEFAUL
 
 async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles text input for custom buy amount."""
+    # Clean up bot messages on user text input
+    chat_id = update.effective_chat.id
+    await ensure_message_cleanup_on_user_action(context, chat_id)
+    
     try:
         amount = float(update.message.text.strip())
         if amount <= 0:
