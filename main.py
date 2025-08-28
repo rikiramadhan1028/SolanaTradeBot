@@ -379,6 +379,34 @@ async def delete_all_bot_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: i
     except Exception as e:
         print(f"Error deleting bot messages: {e}")
 
+async def delete_all_bot_messages_except_current(context: ContextTypes.DEFAULT_TYPE, chat_id: int, current_message_id: int) -> None:
+    """Delete all bot messages tracked in context except the current one"""
+    try:
+        bot = context.bot
+        
+        # Delete the last bot message if it's not the current one
+        last_message_id = context.user_data.get("last_bot_message_id")
+        if last_message_id and last_message_id != current_message_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=last_message_id)
+            except:
+                pass
+        
+        # Delete all tracked bot messages except current one
+        bot_messages = context.user_data.get("bot_messages_to_delete", [])
+        for message_id in bot_messages:
+            if message_id != current_message_id:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except:
+                    pass
+                    
+        # Update tracking to keep only current message
+        context.user_data["bot_messages_to_delete"] = [current_message_id]
+        context.user_data["last_bot_message_id"] = current_message_id
+    except Exception as e:
+        print(f"Error deleting bot messages: {e}")
+
 async def track_bot_message(context: ContextTypes.DEFAULT_TYPE, message_id: int) -> None:
     """Track bot message for automatic deletion"""
     if "bot_messages_to_delete" not in context.user_data:
@@ -892,14 +920,16 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await q.answer()
     chat_id = update.effective_chat.id
     
-    # Delete all bot messages before navigating to assets view
-    await clear_user_context_with_cleanup(context, chat_id)
-    
     # init state default agar tidak menyaring dust & tampilkan detail
     context.user_data.setdefault("assets_state", {
         "page": 1, "sort": "value", "hide_dust": False,
         "dust_usd": DEFAULT_DUST_USD, "detail": True, "hidden_mints": set()
     })
+    
+    # Clean up other tracked messages first, then render assets
+    await delete_all_bot_messages_except_current(context, chat_id, q.message.message_id)
+    clear_user_context(context)
+    
     await _render_assets_detailed_view(q, context)
 
 
@@ -1398,9 +1428,6 @@ async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await q.answer()
     chat_id = update.effective_chat.id
     user_id = q.from_user.id
-    
-    # Delete all bot messages before navigating to copy trading menu
-    await clear_user_context_with_cleanup(context, chat_id)
 
     follows = database.copy_follow_list_for_user(user_id) or []
     rows = []
@@ -1438,7 +1465,20 @@ async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         *kb_rows,
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
     ]
-    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    try:
+        # Try to edit current message first
+        await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        # Track this message for cleanup
+        await track_bot_message(context, q.message.message_id)
+    except Exception:
+        # If edit fails, send new message
+        response = await q.message.reply_html(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await track_bot_message(context, response.message_id)
+    
+    # Clean up other tracked messages (but not the current one)
+    await delete_all_bot_messages_except_current(context, chat_id, q.message.message_id)
+    clear_user_context(context)
     
 def _is_pubkey(x: str) -> bool:
     try:
@@ -1614,9 +1654,6 @@ async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    
-    # Delete all bot messages before navigating
-    await clear_user_context_with_cleanup(context, chat_id)
     keyboard_buttons = []
     keyboard_buttons.append(
         [
@@ -1628,7 +1665,20 @@ async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard_buttons.append([InlineKeyboardButton("💸 Withdraw SOL", callback_data="withdraw_sol")])
     keyboard_buttons.append([InlineKeyboardButton("Import Wallet", callback_data="import_wallet")])
     keyboard_buttons.append([InlineKeyboardButton("Back to Menu", callback_data="back_to_main_menu")])
-    await query.edit_message_text("Wallet Options:", reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+    
+    try:
+        # Try to edit current message first
+        await query.edit_message_text("Wallet Options:", reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+        # Track this message for cleanup
+        await track_bot_message(context, query.message.message_id)
+    except Exception:
+        # If edit fails, send new message
+        response = await query.message.reply_text("Wallet Options:", reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+        await track_bot_message(context, response.message_id)
+    
+    # Clean up other tracked messages (but not the current one)
+    await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    clear_user_context(context)
 
 async def handle_create_wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_context(context)
@@ -2187,14 +2237,23 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    
-    # Delete all bot messages before navigating
-    await clear_user_context_with_cleanup(context, chat_id)
-    
     user_id = query.from_user.id
     user_mention = query.from_user.mention_html()
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
-    await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode="HTML")
+    
+    try:
+        # Try to edit current message first
+        await query.edit_message_text(welcome_text, reply_markup=get_start_menu_keyboard(user_id), parse_mode="HTML")
+        # Track this message for cleanup
+        await track_bot_message(context, query.message.message_id)
+    except Exception:
+        # If edit fails, send new message and clean up old ones
+        response = await query.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
+        await track_bot_message(context, response.message_id)
+    
+    # Clean up other tracked messages (but not the current one)
+    await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    clear_user_context(context)
 
 async def back_to_main_menu_and_end_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Ends the conversation and shows the main menu."""
@@ -2447,9 +2506,6 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
-    
-    # Delete all bot messages before navigating
-    await clear_user_context_with_cleanup(context, chat_id)
 
     keyboard = [
         [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
@@ -2463,7 +2519,21 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     ]
 
     message_text = "Choose a trading option or enter a token address to start trading."
-    await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    try:
+        # Try to edit current message first
+        await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        # Track this message for cleanup
+        await track_bot_message(context, query.message.message_id)
+    except Exception:
+        # If edit fails, send new message and clean up old ones
+        response = await query.message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await track_bot_message(context, response.message_id)
+    
+    # Clean up other tracked messages (but not the current one)
+    await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    clear_user_context(context)
+    
     return AWAITING_TOKEN_ADDRESS
 
 async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
