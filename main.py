@@ -447,6 +447,21 @@ async def auto_edit_message_text(query, text: str, context: ContextTypes.DEFAULT
     await track_bot_message(context, query.message.message_id)
     return query
 
+async def safe_edit_with_tracking(query, text: str, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+    """Edit message text with tracking and fallback to new message if edit fails"""
+    try:
+        await query.edit_message_text(text, **kwargs)
+        await track_bot_message(context, query.message.message_id)
+    except Exception:
+        # If edit fails, send new message
+        response = await query.message.reply_text(text, **kwargs)
+        await track_bot_message(context, response.message_id)
+        # Try to delete the original message
+        try:
+            await query.message.delete()
+        except:
+            pass
+
 async def safe_edit_message(query, text: str, **kwargs):
     """Safely edit message and store ID for cleanup"""
     try:
@@ -983,6 +998,13 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     if not addr:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]])
         await q_or_msg.edit_message_text("📊 <b>Your Asset Balances</b>\n\nNo wallet yet.", parse_mode="HTML", reply_markup=kb)
+        # Track for cleanup if it's a callback query
+        if hasattr(q_or_msg, "message"):
+            context = q_or_msg  # This should be context, but let's try to handle it
+            try:
+                await track_bot_message(context, q_or_msg.message.message_id)
+            except:
+                pass
         return
 
     st = context.user_data.get("assets_state", {})
@@ -2599,14 +2621,19 @@ async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAU
     return AWAITING_TOKEN_ADDRESS
 
 async def handle_token_address_for_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Clean up bot messages on user text input
+    chat_id = update.effective_chat.id
+    await ensure_message_cleanup_on_user_action(context, chat_id)
+    
     message = update.message if update.message else update.callback_query.message
     token_address = message.text.strip()
 
     if not _is_valid_pubkey(token_address):
-        await message.reply_text(
+        response = await message.reply_text(
             "❌ Invalid token address format. Please enter a valid Solana token address.",
             reply_markup=back_markup("back_to_main_menu"),
         )
+        await track_bot_message(context, response.message_id)
         return AWAITING_TOKEN_ADDRESS
 
     context.user_data["token_address"] = token_address
@@ -2627,6 +2654,8 @@ async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAU
         return await handle_back_to_buy_sell_menu(update, context)
     panel = await build_token_panel(q.from_user.id, mint)
     await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+    # Track this edited message for cleanup
+    await track_bot_message(context, q.message.message_id)
     return AWAITING_TRADE_ACTION
 
 async def handle_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2901,7 +2930,32 @@ async def _handle_trade_response(
         except:
             success_msg = "✅ Swap successful!"
             
-        await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
+        # Edit the loading message instead of creating a new one
+        loading_msg_id = context.user_data.get("loading_message_id")
+        if loading_msg_id:
+            try:
+                extra = ""
+                if sig:
+                    extra = f'\n🔗 <a href="{solscan_tx(sig)}">Solscan</a>\n<code>{sig}</code>'
+                
+                await context.bot.edit_message_text(
+                    chat_id=message.chat_id,
+                    message_id=loading_msg_id,
+                    text=success_msg + extra,
+                    parse_mode="HTML",
+                    reply_markup=back_markup(prev_cb)
+                )
+                
+                # Schedule cleanup for success messages
+                import asyncio
+                asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, loading_msg_id, 5))
+            except Exception:
+                # Fallback to reply if edit fails
+                await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
+        else:
+            await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
+        
+        context.user_data.pop("loading_message_id", None)
         return True
     else:
         err = res.get("error") if isinstance(res, dict) else res
@@ -2914,7 +2968,24 @@ async def _handle_trade_response(
         except:
             error_msg = f"❌ Swap failed: {short_err_text(str(err))}"
             
-        await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        # Edit the loading message instead of creating a new one
+        loading_msg_id = context.user_data.get("loading_message_id")
+        if loading_msg_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=message.chat_id,
+                    message_id=loading_msg_id,
+                    text=error_msg,
+                    parse_mode="HTML",
+                    reply_markup=back_markup(prev_cb)
+                )
+            except Exception:
+                # Fallback to reply if edit fails
+                await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        else:
+            await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        
+        context.user_data.pop("loading_message_id", None)
         return False
 
 
@@ -2980,12 +3051,14 @@ async def perform_trade(
     except:
         loading_msg = f"⏳ Performing {trade_type} `{token_mint}` via {selected_dex.capitalize()}…"
     
-    await reply_ok_html(
+    # Send loading message and store its ID for editing
+    loading_response = await reply_ok_html(
         message,
         loading_msg,
         prev_cb=prev_cb,
         context=context,
     )
+    context.user_data["loading_message_id"] = loading_response.message_id
 
     # eksekusi
     try:
@@ -3071,12 +3144,24 @@ async def perform_trade(
         except:
             error_msg = f"❌ An unexpected error occurred: {short_err_text(str(e))}"
             
-        await reply_err_html(
-            message,
-            error_msg,
-            prev_cb=prev_cb,
-            context=context,
-        )
+        # Edit the loading message instead of creating a new one
+        loading_msg_id = context.user_data.get("loading_message_id")
+        if loading_msg_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=message.chat_id,
+                    message_id=loading_msg_id,
+                    text=error_msg,
+                    parse_mode="HTML",
+                    reply_markup=back_markup(prev_cb)
+                )
+            except Exception:
+                # Fallback to reply if edit fails
+                await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        else:
+            await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        
+        context.user_data.pop("loading_message_id", None)
         return False
     finally:
         clear_user_context(context)
