@@ -2912,9 +2912,9 @@ async def perform_trade(
     try:
         meta = await MetaCache.get(token_mint)
         token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
-        loading_msg = f"⏳ Performing {trade_type} on {token_symbol} via {selected_dex.capitalize()}…"
+        loading_msg = f"⏳ Performing {trade_type} {token_symbol} via {selected_dex.capitalize()}…"
     except:
-        loading_msg = f"⏳ Performing {trade_type} on `{token_mint}` via {selected_dex.capitalize()}…"
+        loading_msg = f"⏳ Performing {trade_type} `{token_mint}` via {selected_dex.capitalize()}…"
     
     await reply_ok_html(
         message,
