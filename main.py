@@ -3576,8 +3576,33 @@ async def _handle_trade_response(
         # Clean up all tracked messages (loading message already auto-deleted)
         await delete_all_bot_messages(context, message.chat_id)
         
-        # Send success message instantly after loading disappears  
-        await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
+        # Get fresh trading panel after successful trade
+        try:
+            user_id = update.effective_user.id
+            fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True)
+            
+            # Combine success message with fresh trading panel
+            extra = ""
+            if sig:
+                extra = f'\n🔗 <a href="{solscan_tx(sig)}">Solscan</a>\n<code>{sig}</code>'
+            
+            combined_message = f"{success_msg}{extra}\n\n━━━━━━━━━━━━━━━━━━━━\n{fresh_panel}"
+            
+            # Send combined message with trading panel keyboard
+            response = await message.reply_html(
+                combined_message, 
+                reply_markup=token_panel_keyboard(context, user_id), 
+                disable_web_page_preview=True
+            )
+            await track_bot_message(context, response.message_id)
+            
+            # Auto-cleanup combined message after 5 minutes (longer than success-only)
+            asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, response.message_id, 5))
+            
+        except Exception as e:
+            print(f"Error creating combined success+panel message: {e}")
+            # Fallback to regular success message
+            await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
         
         context.user_data.pop("loading_message_id", None)
         return True
@@ -3601,8 +3626,17 @@ async def _handle_trade_response(
         # Clean up all tracked messages (loading message already auto-deleted)
         await delete_all_bot_messages(context, message.chat_id)
         
-        # Send error message instantly after loading disappears
-        await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        # Get fresh trading panel after failed trade for easy retry
+        try:
+            fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True)
+            combined_message = f"{error_msg}\n\n━━━━━━━━━━━━━━━━━━━━\n{fresh_panel}"
+            response = await message.reply_html(combined_message, reply_markup=token_panel_keyboard(context, user_id))
+            # Track the response message for cleanup
+            add_user_response_to_track(context, response.message_id)
+        except Exception as e:
+            print(f"Failed to show trading panel after error: {e}")
+            # Fallback to just error message
+            await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         
         context.user_data.pop("loading_message_id", None)
         return False
