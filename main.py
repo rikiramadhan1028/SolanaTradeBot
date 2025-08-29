@@ -146,9 +146,13 @@ async def handle_admin_user_stats(update: Update, context: ContextTypes.DEFAULT_
     except ImportError:
         response = await update.message.reply_html("❌ MongoDB database not available.")
         await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
     except Exception as e:
         response = await update.message.reply_html(f"❌ Error getting user stats: {e}")
         await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
 
 # CU Settings conversation states
 SET_CU_PRICE = 1
@@ -552,6 +556,9 @@ async def reply_err_html(message, text: str, prev_cb: str | None = None, context
     response = await message.reply_html(text, reply_markup=back_markup(prev_cb))
     if context:
         await track_bot_message(context, response.message_id)
+        # Auto-cleanup error messages after 5 minutes
+        chat_id = message.chat_id
+        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
     return response
 
 def _is_valid_pubkey(addr: str) -> bool:
@@ -1330,7 +1337,11 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
     addr = (w or {}).get("address")
     
     if not addr:
-        await q.message.reply_text("❌ No wallet found")
+        response = await q.message.reply_text("❌ No wallet found")
+        await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        chat_id = q.message.chat_id
+        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
         return
     
     try:
@@ -1384,10 +1395,18 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
                 parse_mode="HTML"
             )
         else:
-            await q.message.reply_text("❌ No PnL data available for this token")
+            response = await q.message.reply_text("❌ No PnL data available for this token")
+            await track_bot_message(context, response.message_id)
+            # Auto-cleanup error message after 5 minutes
+            chat_id = q.message.chat_id
+            asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
             
     except Exception as e:
-        await q.message.reply_text(f"❌ Error sharing PnL: {str(e)}")
+        response = await q.message.reply_text(f"❌ Error sharing PnL: {str(e)}")
+        await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        chat_id = q.message.chat_id
+        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
 
 async def handle_trade(q, context: ContextTypes.DEFAULT_TYPE):
     """Handle trade button from assets view - navigate to token panel for specific token"""
@@ -1433,7 +1452,11 @@ async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
     addr = (w or {}).get("address")
     
     if not addr:
-        await q.message.reply_text("❌ No wallet found")
+        response = await q.message.reply_text("❌ No wallet found")
+        await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        chat_id = q.message.chat_id
+        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
         return
     
     try:
@@ -1518,7 +1541,11 @@ async def handle_share_full_portfolio(q, context: ContextTypes.DEFAULT_TYPE):
         )
         
     except Exception as e:
-        await q.message.reply_text(f"❌ Error sharing portfolio: {str(e)}")
+        response = await q.message.reply_text(f"❌ Error sharing portfolio: {str(e)}")
+        await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        chat_id = q.message.chat_id
+        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
 
 # ===== Copy Trading UI =====
 async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1599,6 +1626,8 @@ async def handle_copy_text_commands(update: Update, context: ContextTypes.DEFAUL
         if not _is_pubkey(leader):
             response = await update.message.reply_html("❌ Invalid leader pubkey.", reply_markup=back_markup("back_to_main_menu"))
             await track_bot_message(context, response.message_id)
+            # Auto-cleanup error message after 5 minutes
+            asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
             return
         try:
             ratio = float(parts[2])
@@ -1606,6 +1635,8 @@ async def handle_copy_text_commands(update: Update, context: ContextTypes.DEFAUL
         except Exception:
             response = await update.message.reply_html("❌ Usage: <code>copyadd LEADER_PUBKEY RATIO MAX_SOL</code>", reply_markup=back_markup("back_to_main_menu"))
             await track_bot_message(context, response.message_id)
+            # Auto-cleanup error message after 5 minutes
+            asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
             return
         database.copy_follow_upsert(user_id, leader, ratio=ratio, max_sol_per_trade=max_sol, active=True)
         response = await update.message.reply_html("✅ Copy-follow added/updated.", reply_markup=back_markup("back_to_main_menu"))
@@ -1684,6 +1715,8 @@ async def copy_add_leader(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not _is_pubkey(leader):
         response = await update.message.reply_html("❌ Invalid pubkey. Please try again.", reply_markup=back_markup("copy_menu"))
         await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
         return COPY_AWAIT_LEADER
     context.user_data["copy_leader"] = leader
     
@@ -1707,7 +1740,9 @@ async def copy_add_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         response = await update.message.reply_html("❌ Invalid ratio. Example: <code>1</code> or <code>0.5</code>.",
                                         reply_markup=back_markup("copy_menu"))
-        await store_bot_message(context, response.message_id)
+        await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
         return COPY_AWAIT_RATIO
     context.user_data["copy_ratio"] = ratio
     
@@ -1731,7 +1766,9 @@ async def copy_add_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     except Exception:
         response = await update.message.reply_html("❌ Invalid max SOL. Example: <code>0.25</code>.",
                                         reply_markup=back_markup("copy_menu"))
-        await store_bot_message(context, response.message_id)
+        await track_bot_message(context, response.message_id)
+        # Auto-cleanup error message after 5 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, update.effective_chat.id, response.message_id, 5))
         return COPY_AWAIT_MAX
 
     user_id = update.effective_user.id
