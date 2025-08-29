@@ -169,6 +169,11 @@ JITO_ENABLED = os.getenv("JITO_ENABLED", "true").lower() in ("true", "1", "yes",
 
 import config
 import database
+from database import (
+    get_user_slippage_buy, get_user_slippage_sell, get_user_language, 
+    get_user_anti_mev, get_user_jupiter_versioned_tx, get_user_jupiter_skip_preflight,
+    user_settings_upsert
+)
 import wallet_manager
 from blockchain_clients.solana_client import SolanaClient
 
@@ -900,9 +905,10 @@ async def handle_direct_private_key_import(update: Update, context: ContextTypes
             pass # Ignore if message can't be deleted
  
 # ================== Token Panel (no DEX selection) ==================
-def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
-    buy_bps = int(context.user_data.get("slippage_bps_buy", 500))   # default 5%
-    sell_bps = int(context.user_data.get("slippage_bps_sell", 500)) # default 5%
+def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> InlineKeyboardMarkup:
+    # Get slippage from database instead of context
+    buy_bps = get_user_slippage_buy(user_id)
+    sell_bps = get_user_slippage_sell(user_id)
     kb: list[list[InlineKeyboardButton]] = []
     kb.append([
         InlineKeyboardButton("↻ Refresh", callback_data="token_panel_refresh"),
@@ -924,10 +930,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
         InlineKeyboardButton("Sell 50%",  callback_data="sell_pct_50"),
         InlineKeyboardButton("Sell All",  callback_data="sell_pct_100"),
     ])
-    kb.append([
-        InlineKeyboardButton(f"✓ {percent_label(buy_bps)} Buy Slippage",  callback_data="set_buy_slippage"),
-        InlineKeyboardButton(f"× {percent_label(sell_bps)} Sell Slippage", callback_data="set_sell_slippage"),
-    ])
+    # Slippage moved to settings menu - no longer shown in trading panel
     kb.append([
         InlineKeyboardButton("⬅️ Change Token", callback_data="back_to_buy_sell_menu"),
         InlineKeyboardButton("🏠 Menu",   callback_data="back_to_main_menu"),
@@ -2457,27 +2460,60 @@ def _tier_of(cu_val: Optional[int]) -> str:
         else:
             return f"CUSTOM ({sol_fee:.3f} SOL = {lamports:,} lamports)"
 
-def _settings_keyboard():
-    """Return the settings menu keyboard."""
+def _settings_keyboard(user_id: int):
+    """Return the elegant settings menu keyboard with all options."""
+    # Get current settings
+    buy_slip = get_user_slippage_buy(user_id)
+    sell_slip = get_user_slippage_sell(user_id)
+    anti_mev = get_user_anti_mev(user_id)
+    
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔴 OFF", callback_data="set_cu:off"), 
-         InlineKeyboardButton("🟡 FAST", callback_data="set_cu:fast")],
-        [InlineKeyboardButton("🟠 TURBO", callback_data="set_cu:turbo"), 
-         InlineKeyboardButton("🔥 ULTRA", callback_data="set_cu:ultra")],
-        [InlineKeyboardButton("✏️ Custom", callback_data="set_cu:custom")],
+        # Priority Fee Settings
+        [InlineKeyboardButton("⚡ Priority Fees", callback_data="settings_priority_fees")],
+        
+        # Slippage Settings
+        [InlineKeyboardButton(f"📈 Buy Slippage: {buy_slip/100:.1f}%", callback_data="settings_slippage_buy"),
+         InlineKeyboardButton(f"📉 Sell Slippage: {sell_slip/100:.1f}%", callback_data="settings_slippage_sell")],
+        
+        # Anti-MEV & Optimization
+        [InlineKeyboardButton(f"🛡️ Anti-MEV: {'✅ ON' if anti_mev else '❌ OFF'}", callback_data="settings_toggle_antimev")],
+        [InlineKeyboardButton("🚀 Jupiter Optimization", callback_data="settings_jupiter_opts")],
+        
+        # Language & Back  
         [InlineKeyboardButton("🌐 Language", callback_data="change_language")],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ])
 
 async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the settings menu callback."""
+    """Handle the elegant settings menu callback."""
     q = update.callback_query
+    user_id = q.from_user.id
     await q.answer()
     
-    user_id = str(update.effective_user.id)
-    user_cu_price = get_user_cu_price(user_id)
+    # Get current priority tier for display
+    user_cu_price = get_user_cu_price(str(user_id))
+    current_tier = _tier_of(user_cu_price)
+    
+    text = f"⚙️ <b>Bot Settings</b>\n\n"
+    text += f"Current Priority Tier: <code>{current_tier}</code>\n\n"
+    text += "Configure your trading preferences below:"
+    
+    await q.edit_message_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=_settings_keyboard(user_id)
+    )
+
+# New settings handlers
+async def handle_settings_priority_fees(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle priority fees submenu."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    user_cu_price = get_user_cu_price(str(user_id))
     current = _tier_of(user_cu_price)
-    text = f"⚙️ <b>Settings</b>\n\n📊 Current Priority: <code>{current}</code>\n\nSelect priority level:"
+    text = f"⚡ <b>Priority Fees</b>\n\n📊 Current: <code>{current}</code>\n\nSelect priority level:"
     
     keyboard = [
         [InlineKeyboardButton("🔴 OFF", callback_data="set_cu:off"), 
@@ -2485,15 +2521,94 @@ async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🟠 TURBO", callback_data="set_cu:turbo"), 
          InlineKeyboardButton("🔥 ULTRA", callback_data="set_cu:ultra")],
         [InlineKeyboardButton("✏️ Custom", callback_data="set_cu:custom")],
-        [InlineKeyboardButton("🌐 Language", callback_data="change_language")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
+        [InlineKeyboardButton("⬅️ Back to Settings", callback_data="menu_settings")]
     ]
     
-    await q.edit_message_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_settings_slippage_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle buy slippage settings."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    current = get_user_slippage_buy(user_id)
+    text = f"📈 <b>Buy Slippage</b>\n\nCurrent: <code>{current/100:.1f}%</code>\n\nSelect slippage tolerance:"
+    
+    keyboard = [
+        [InlineKeyboardButton("0.5%", callback_data="set_slippage_buy:50"),
+         InlineKeyboardButton("1%", callback_data="set_slippage_buy:100"),
+         InlineKeyboardButton("3%", callback_data="set_slippage_buy:300")],
+        [InlineKeyboardButton("5%", callback_data="set_slippage_buy:500"),
+         InlineKeyboardButton("10%", callback_data="set_slippage_buy:1000"),
+         InlineKeyboardButton("20%", callback_data="set_slippage_buy:2000")],
+        [InlineKeyboardButton("⬅️ Back to Settings", callback_data="menu_settings")]
+    ]
+    
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_settings_slippage_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle sell slippage settings."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    current = get_user_slippage_sell(user_id)
+    text = f"📉 <b>Sell Slippage</b>\n\nCurrent: <code>{current/100:.1f}%</code>\n\nSelect slippage tolerance:"
+    
+    keyboard = [
+        [InlineKeyboardButton("0.5%", callback_data="set_slippage_sell:50"),
+         InlineKeyboardButton("1%", callback_data="set_slippage_sell:100"),
+         InlineKeyboardButton("3%", callback_data="set_slippage_sell:300")],
+        [InlineKeyboardButton("5%", callback_data="set_slippage_sell:500"),
+         InlineKeyboardButton("10%", callback_data="set_slippage_sell:1000"),
+         InlineKeyboardButton("20%", callback_data="set_slippage_sell:2000")],
+        [InlineKeyboardButton("⬅️ Back to Settings", callback_data="menu_settings")]
+    ]
+    
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_settings_toggle_antimev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle Anti-MEV protection."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    current = get_user_anti_mev(user_id)
+    new_value = not current
+    
+    # Update database
+    user_settings_upsert(user_id, anti_mev=new_value)
+    
+    status = "✅ ENABLED" if new_value else "❌ DISABLED"
+    await q.answer(f"Anti-MEV protection {status}", show_alert=True)
+    
+    # Refresh settings menu
+    await handle_menu_settings(update, context)
+
+async def handle_settings_jupiter_opts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Jupiter optimization settings."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    versioned_tx = get_user_jupiter_versioned_tx(user_id)
+    skip_preflight = get_user_jupiter_skip_preflight(user_id)
+    
+    text = f"🚀 <b>Jupiter Optimization</b>\n\n"
+    text += f"Versioned Transactions: {'✅ ON' if versioned_tx else '❌ OFF'}\n"
+    text += f"Skip Preflight: {'✅ ON' if skip_preflight else '❌ OFF'}\n\n"
+    text += "<i>Versioned TX = Faster processing\nSkip Preflight = Higher speed, higher risk</i>"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"📦 Versioned TX: {'ON' if versioned_tx else 'OFF'}", 
+                            callback_data="toggle_jupiter_versioned")],
+        [InlineKeyboardButton(f"⚡ Skip Preflight: {'ON' if skip_preflight else 'OFF'}", 
+                            callback_data="toggle_jupiter_preflight")],
+        [InlineKeyboardButton("⬅️ Back to Settings", callback_data="menu_settings")]
+    ]
+    
+    await q.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle priority tier selection."""
@@ -2502,6 +2617,76 @@ async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT
     
     user_id = str(update.effective_user.id)
     choice = q.data.split(":", 1)[1]  # "set_cu:off" -> "off"
+
+# Slippage handlers
+async def handle_set_slippage_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle buy slippage selection."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    slippage_bps = int(q.data.split(":", 1)[1])  # "set_slippage_buy:500" -> 500
+    
+    # Update database
+    user_settings_upsert(user_id, slippage_buy=slippage_bps)
+    
+    await q.answer(f"Buy slippage set to {slippage_bps/100:.1f}%", show_alert=True)
+    
+    # Refresh settings menu
+    await handle_menu_settings(update, context)
+
+async def handle_set_slippage_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle sell slippage selection."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    slippage_bps = int(q.data.split(":", 1)[1])  # "set_slippage_sell:500" -> 500
+    
+    # Update database
+    user_settings_upsert(user_id, slippage_sell=slippage_bps)
+    
+    await q.answer(f"Sell slippage set to {slippage_bps/100:.1f}%", show_alert=True)
+    
+    # Refresh settings menu
+    await handle_menu_settings(update, context)
+
+# Jupiter optimization toggles
+async def handle_toggle_jupiter_versioned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle Jupiter versioned transactions."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    current = get_user_jupiter_versioned_tx(user_id)
+    new_value = not current
+    
+    # Update database
+    user_settings_upsert(user_id, jupiter_versioned_tx=new_value)
+    
+    status = "ENABLED" if new_value else "DISABLED"
+    await q.answer(f"Versioned transactions {status}", show_alert=True)
+    
+    # Refresh Jupiter settings
+    await handle_settings_jupiter_opts(update, context)
+
+async def handle_toggle_jupiter_preflight(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle Jupiter skip preflight."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    await q.answer()
+    
+    current = get_user_jupiter_skip_preflight(user_id)
+    new_value = not current
+    
+    # Update database
+    user_settings_upsert(user_id, jupiter_skip_preflight=new_value)
+    
+    status = "ENABLED" if new_value else "DISABLED"
+    await q.answer(f"Skip preflight {status}", show_alert=True)
+    
+    # Refresh Jupiter settings
+    await handle_settings_jupiter_opts(update, context)
     
     if choice == "custom":
         context.user_data["awaiting_custom_cu"] = True
@@ -2701,11 +2886,10 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
     context.user_data["token_address"] = token_address
     context.user_data["selected_dex"] = "jupiter"  # fixed route
-    context.user_data.setdefault("slippage_bps_buy", 500)   # 5%
-    context.user_data.setdefault("slippage_bps_sell", 500)  # 5%
+    # Slippage now managed through database settings
 
     panel = await build_token_panel(update.effective_user.id, token_address)
-    response = await message.reply_html(panel, reply_markup=token_panel_keyboard(context))
+    response = await message.reply_html(panel, reply_markup=token_panel_keyboard(context, update.effective_user.id))
     await track_bot_message(context, response.message_id)
     return AWAITING_TRADE_ACTION
 
@@ -3053,8 +3237,9 @@ async def perform_trade(
     trade_type   = (context.user_data.get("trade_type") or "").lower()      # buy|sell
     amount_type  = (context.user_data.get("amount_type") or "").lower()     # sol|percentage
     token_mint   = context.user_data.get("token_address")
-    buy_slip_bps = int(context.user_data.get("slippage_bps_buy",  500))
-    sel_slip_bps = int(context.user_data.get("slippage_bps_sell", 500))
+    # Get slippage from database instead of context
+    buy_slip_bps = get_user_slippage_buy(user_id)
+    sel_slip_bps = get_user_slippage_sell(user_id)
 
     if not token_mint:
         await reply_err_html(message, "❌ No token mint in context.", prev_cb="back_to_buy_sell_menu", context=context)
@@ -3129,11 +3314,24 @@ async def perform_trade(
             user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
             
             
+            # Get Jupiter optimization and Anti-MEV settings from database
+            enable_versioned_tx = get_user_jupiter_versioned_tx(user_id)
+            skip_preflight = get_user_jupiter_skip_preflight(user_id)
+            anti_mev_enabled = get_user_anti_mev(user_id)
+            
+            # Anti-MEV implementation: If enabled, force versioned transactions and higher priority
+            if anti_mev_enabled:
+                enable_versioned_tx = True  # Force versioned TX for MEV protection
+                if user_priority_tier == "off":
+                    user_priority_tier = "fast"  # Minimum priority for MEV protection
+            
             res = await dex_swap(
                 private_key=wallet["private_key"],
                 **prep["params"],
                 priority_tier=user_priority_tier,  # Use tier system
                 compute_unit_price_micro_lamports=user_cu_price,  # Fallback for legacy
+                enable_versioned_tx=enable_versioned_tx,  # Jupiter optimization
+                skip_preflight=skip_preflight,  # Jupiter optimization  
             )
 
         # handle sukses/gagal + update posisi
@@ -3206,11 +3404,13 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         if pct <= 0 or pct > 100:
             raise ValueError("out of range")
         bps = int(round(pct * 100))
+        # Update database instead of context
         tgt = context.user_data.get("slippage_target", "buy")
+        user_id = update.effective_user.id
         if tgt == "sell":
-            context.user_data["slippage_bps_sell"] = bps
+            user_settings_upsert(user_id, slippage_sell=bps)
         else:
-            context.user_data["slippage_bps_buy"] = bps
+            user_settings_upsert(user_id, slippage_buy=bps)
         context.user_data.pop("awaiting_slippage_input", None)
         context.user_data.pop("slippage_target", None)
         # Clean up bot messages first
@@ -3271,7 +3471,7 @@ async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEF
 
     context.user_data["token_address"] = token_address
     context.user_data["selected_dex"] = "pumpfun" # IMPORTANT: Tag this as a Pump.fun transaction
-    context.user_data.setdefault("slippage_bps_buy", 500)  # 5% default
+    # Slippage now managed through database settings
 
     panel_text = f"🤖 <b>Pump.fun Trade</b>\n\nToken: <code>{token_address}</code>"
     keyboard = [
@@ -3279,10 +3479,7 @@ async def pumpfun_handle_token_address(update: Update, context: ContextTypes.DEF
             InlineKeyboardButton("Buy (SOL)", callback_data="pumpfun_buy"),
             InlineKeyboardButton("Sell (%)", callback_data="pumpfun_sell"),
         ],
-        [
-             InlineKeyboardButton(f"Slippage: {percent_label(context.user_data['slippage_bps_buy'])}",
-                callback_data="pumpfun_set_slippage")
-        ],
+        # Slippage moved to settings menu
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ]
     response = await message.reply_html(panel_text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -3404,10 +3601,7 @@ async def pumpfun_back_to_panel(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("Buy (SOL)", callback_data="pumpfun_buy"),
             InlineKeyboardButton("Sell (%)", callback_data="pumpfun_sell"),
         ],
-        [
-             InlineKeyboardButton(f"Slippage: {percent_label(context.user_data.get('slippage_bps_buy', 500))}",
-                callback_data="pumpfun_set_slippage")
-        ],
+        # Slippage moved to settings menu
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ]
     await query.edit_message_text(panel_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -3572,9 +3766,24 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_confirm_export_private_key, pattern="^confirm_export_pk$"))
     application.add_handler(CallbackQueryHandler(handle_delete_private_key_msg, pattern="^delete_private_key_msg$"))
     application.add_handler(CallbackQueryHandler(handle_send_asset, pattern="^send_asset$"))
-    # Settings handlers
+    # Settings handlers - Enhanced settings UI
     application.add_handler(CallbackQueryHandler(handle_menu_settings, pattern=r"^menu_settings$"))
+    application.add_handler(CallbackQueryHandler(handle_settings_priority_fees, pattern=r"^settings_priority_fees$"))
+    application.add_handler(CallbackQueryHandler(handle_settings_slippage_buy, pattern=r"^settings_slippage_buy$"))
+    application.add_handler(CallbackQueryHandler(handle_settings_slippage_sell, pattern=r"^settings_slippage_sell$"))
+    application.add_handler(CallbackQueryHandler(handle_settings_toggle_antimev, pattern=r"^settings_toggle_antimev$"))
+    application.add_handler(CallbackQueryHandler(handle_settings_jupiter_opts, pattern=r"^settings_jupiter_opts$"))
+    
+    # Priority tier handlers
     application.add_handler(CallbackQueryHandler(handle_set_priority_tier, pattern=r"^set_cu:(off|fast|turbo|ultra)$"))
+    
+    # Slippage handlers
+    application.add_handler(CallbackQueryHandler(handle_set_slippage_buy, pattern=r"^set_slippage_buy:\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_set_slippage_sell, pattern=r"^set_slippage_sell:\d+$"))
+    
+    # Jupiter optimization handlers
+    application.add_handler(CallbackQueryHandler(handle_toggle_jupiter_versioned, pattern=r"^toggle_jupiter_versioned$"))
+    application.add_handler(CallbackQueryHandler(handle_toggle_jupiter_preflight, pattern=r"^toggle_jupiter_preflight$"))
     
     # Other dummy handlers
     application.add_handler(

@@ -162,6 +162,9 @@ async def dex_swap(
     compute_unit_price_micro_lamports: Optional[int] = None,
     exact_out: bool = False,
     force_legacy: bool = False,
+    enable_versioned_tx: bool = True,  # Use versioned transactions for faster processing
+    skip_preflight: bool = False,      # Skip preflight for speed (higher risk)
+    max_accounts: Optional[int] = None, # Limit accounts to reduce tx size
 ) -> Dict[str, Any]:
     """
     Kirim permintaan swap ke trade-svc (/dex/swap) dengan unified priority fee logic.
@@ -176,7 +179,11 @@ async def dex_swap(
         "slippageBps": int(slippage_bps),
         "exactOut": bool(exact_out),
         "forceLegacy": bool(force_legacy),
+        "enableVersionedTx": bool(enable_versioned_tx),
+        "skipPreflight": bool(skip_preflight),
     }
+    if max_accounts is not None:
+        payload["maxAccounts"] = int(max_accounts)
     
     # UNIFIED PRIORITY FEE LOGIC - Fixed to handle None properly
     final_priority_fee_sol = None

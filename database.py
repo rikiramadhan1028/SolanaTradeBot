@@ -294,7 +294,17 @@ def user_settings_get(user_id: int) -> dict:
     doc = user_settings_collection.find_one({"user_id": int(user_id)})
     return doc if doc else {}
 
-def user_settings_upsert(user_id: int, cu_price: int = None, priority_tier: str = None) -> None:
+def user_settings_upsert(
+    user_id: int, 
+    cu_price: int = None, 
+    priority_tier: str = None,
+    slippage_buy: int = None,
+    slippage_sell: int = None,
+    language: str = None,
+    anti_mev: bool = None,
+    jupiter_versioned_tx: bool = None,
+    jupiter_skip_preflight: bool = None
+) -> None:
     """Update or insert user settings."""
     doc = {
         "user_id": int(user_id),
@@ -311,6 +321,20 @@ def user_settings_upsert(user_id: int, cu_price: int = None, priority_tier: str 
         doc["priority_tier"] = str(priority_tier) if priority_tier else None
     elif priority_tier is None:
         doc["priority_tier"] = None
+    
+    # Add new settings fields
+    if slippage_buy is not None:
+        doc["slippage_buy"] = int(slippage_buy)
+    if slippage_sell is not None:
+        doc["slippage_sell"] = int(slippage_sell)
+    if language is not None:
+        doc["language"] = str(language) if language else "en"
+    if anti_mev is not None:
+        doc["anti_mev"] = bool(anti_mev)
+    if jupiter_versioned_tx is not None:
+        doc["jupiter_versioned_tx"] = bool(jupiter_versioned_tx)
+    if jupiter_skip_preflight is not None:
+        doc["jupiter_skip_preflight"] = bool(jupiter_skip_preflight)
 
     user_settings_collection.update_one(
         {"user_id": int(user_id)},
@@ -355,6 +379,37 @@ def user_settings_set_priority_tier(user_id: int, priority_tier: str = None) -> 
 def user_settings_remove(user_id: int) -> None:
     """Remove all settings for a user."""
     user_settings_collection.delete_one({"user_id": int(user_id)})
+
+# Helper functions for new settings
+def get_user_slippage_buy(user_id: int) -> int:
+    """Get user's buy slippage or default 500 (5%)."""
+    doc = user_settings_get(user_id)
+    return doc.get("slippage_buy", 500)
+
+def get_user_slippage_sell(user_id: int) -> int:
+    """Get user's sell slippage or default 500 (5%)."""
+    doc = user_settings_get(user_id)
+    return doc.get("slippage_sell", 500)
+
+def get_user_language(user_id: int) -> str:
+    """Get user's language or default 'en'."""
+    doc = user_settings_get(user_id)
+    return doc.get("language", "en")
+
+def get_user_anti_mev(user_id: int) -> bool:
+    """Get user's anti-MEV setting or default True."""
+    doc = user_settings_get(user_id)
+    return doc.get("anti_mev", True)
+
+def get_user_jupiter_versioned_tx(user_id: int) -> bool:
+    """Get user's Jupiter versioned tx setting or default True."""
+    doc = user_settings_get(user_id)
+    return doc.get("jupiter_versioned_tx", True)
+
+def get_user_jupiter_skip_preflight(user_id: int) -> bool:
+    """Get user's Jupiter skip preflight setting or default False."""
+    doc = user_settings_get(user_id)
+    return doc.get("jupiter_skip_preflight", False)
 
 def user_settings_list_all() -> list:
     """Get list of all users with settings."""
