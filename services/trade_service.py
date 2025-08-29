@@ -206,15 +206,6 @@ async def dex_swap(
     # Keep SOL for PumpFun compatibility
     payload["priorityFee"] = float(final_priority_fee_sol)
     
-    # Debug: Log priority fee details
-    print(f"DEBUG dex_swap priority fee:")
-    print(f"   - priority_tier: {priority_tier}")
-    print(f"   - compute_unit_price_micro_lamports: {compute_unit_price_micro_lamports}")
-    print(f"   - priority_fee_sol param: {priority_fee_sol}")
-    print(f"   - final_priority_fee_sol: {final_priority_fee_sol}")
-    print(f"   - final_priority_fee_lamports: {final_priority_fee_lamports}")
-    print(f"   - payload priorityFeeLamports: {payload['priorityFeeLamports']}")
-    print(f"   - payload priorityFee: {payload['priorityFee']}")
     
     # Also provide CU-based for backends that need it
     if final_priority_fee_sol > 0:

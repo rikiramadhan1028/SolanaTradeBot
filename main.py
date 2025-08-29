@@ -2393,14 +2393,11 @@ async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAU
 
 async def handle_back_to_token_panel_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Wrapper for back_to_token_panel that works outside conversations."""
-    # Clear any stale context first 
-    print(f"🔧 DEBUG: back_to_token_panel_outside_conv called")
-    print(f"   - user_data keys: {list(context.user_data.keys())}")
+    # Clear any stale context first
     
     # Ensure we have token_address
     mint = context.user_data.get("token_address")
     if not mint:
-        print(f"   - No token_address found, redirecting to buy_sell_menu")
         return await handle_back_to_buy_sell_menu(update, context)
     
     # Build fresh token panel
@@ -2414,9 +2411,7 @@ async def handle_back_to_token_panel_outside_conv(update: Update, context: Conte
     
     try:
         await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
-        print(f"   - Successfully returned to token panel for {mint[:8]}...")
-    except Exception as e:
-        print(f"   - Error updating message: {e}")
+    except Exception:
         # Fallback: send new message if edit fails
         await q.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
 
@@ -2817,13 +2812,6 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
     # Add small base transaction fee on top of priority fee
     buffer_ui += 0.001  # Base tx fee (5000 lamports) + ATA rent
     
-    # Debug: Print calculation details
-    print(f"🔍 DEBUG fee calculation:")
-    print(f"   - total_sol_to_spend: {total_sol_to_spend}")
-    print(f"   - priority_fee (buffer_ui before base): {buffer_ui - 0.001}")
-    print(f"   - base_fee: 0.001")
-    print(f"   - total_buffer_ui: {buffer_ui}")
-    print(f"   - total_needed: {total_sol_to_spend + buffer_ui}")
     
     if sol_balance < total_sol_to_spend + buffer_ui:
         return {
