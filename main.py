@@ -163,6 +163,9 @@ FEE_WALLET  = (os.getenv("FEE_WALLET") or "").strip()
 FEE_ENABLED = FEE_BPS > 0 and len(FEE_WALLET) >= 32
 FEE_MIN_SOL = float(os.getenv("FEE_MIN_SOL", "0.000000001")) if FEE_ENABLED else 0.0
 
+# Jito configuration (default ON for faster transactions)
+JITO_ENABLED = os.getenv("JITO_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+
 
 import config
 import database
@@ -3107,10 +3110,6 @@ async def perform_trade(
             user_priority_tier = get_user_priority_tier(str(user_id))
             user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
             
-            # Debug: Log priority fee selection for PumpFun
-            print(f"🔍 PUMPFUN Priority Debug - User {user_id}:")
-            print(f"   - user_priority_tier: {user_priority_tier}")
-            print(f"   - user_cu_price: {user_cu_price}")
             
             res = await pumpfun_swap(
                 private_key=wallet["private_key"],
@@ -3122,16 +3121,13 @@ async def perform_trade(
                 priority_tier=user_priority_tier,  # NEW: Use tier system
                 compute_unit_price_micro_lamports=user_cu_price,  # Fallback
                 pool="auto",
+                use_jito=JITO_ENABLED,  # Configurable Jito for faster transactions
             )
         else:
             # Use priority tier system for DEX swaps too
             user_priority_tier = get_user_priority_tier(str(user_id))
             user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
             
-            # Debug: Log priority fee selection for DEX
-            print(f"🔍 DEX Priority Debug - User {user_id}:")
-            print(f"   - user_priority_tier: {user_priority_tier}")
-            print(f"   - user_cu_price: {user_cu_price}")
             
             res = await dex_swap(
                 private_key=wallet["private_key"],
