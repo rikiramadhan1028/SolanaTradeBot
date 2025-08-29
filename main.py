@@ -518,6 +518,26 @@ async def reply_ok_html(message, text: str, prev_cb: str | None = None, signatur
             asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
     return response
 
+async def reply_loading_html(message, text: str, context: ContextTypes.DEFAULT_TYPE = None):
+    """Send loading message without buttons and auto-delete after 0.5 seconds"""
+    # Send message without any buttons
+    response = await message.reply_html(text)
+    if context:
+        await track_bot_message(context, response.message_id)
+        # Auto-delete loading message after 0.5 seconds
+        chat_id = message.chat_id
+        asyncio.create_task(auto_delete_loading_message(context, chat_id, response.message_id))
+    return response
+
+async def auto_delete_loading_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    """Delete loading message after 0.5 seconds"""
+    await asyncio.sleep(0.5)  # Wait 0.5 seconds
+    try:
+        bot = context.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass  # Message might already be deleted or edited
+
 async def reply_err_html(message, text: str, prev_cb: str | None = None, context: ContextTypes.DEFAULT_TYPE = None):
     response = await message.reply_html(text, reply_markup=back_markup(prev_cb))
     if context:
@@ -2927,34 +2947,11 @@ async def _handle_trade_response(
         except:
             success_msg = "✅ Swap successful!"
             
-        # Clean up all tracked messages except the loading message (which we'll edit)
-        loading_msg_id = context.user_data.get("loading_message_id")
-        if loading_msg_id:
-            # Delete other tracked messages first (like token panel, etc.)
-            await delete_all_bot_messages_except_current(context, message.chat_id, loading_msg_id)
-            
-            try:
-                extra = ""
-                if sig:
-                    extra = f'\n🔗 <a href="{solscan_tx(sig)}">Solscan</a>\n<code>{sig}</code>'
-                
-                await context.bot.edit_message_text(
-                    chat_id=message.chat_id,
-                    message_id=loading_msg_id,
-                    text=success_msg + extra,
-                    parse_mode="HTML",
-                    reply_markup=back_markup(prev_cb)
-                )
-                
-                # Schedule cleanup for success messages
-                asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, loading_msg_id, 5))
-            except Exception:
-                # Fallback to reply if edit fails
-                await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
-        else:
-            # Clean up all tracked messages before showing success
-            await delete_all_bot_messages(context, message.chat_id)
-            await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
+        # Clean up all tracked messages (loading message already auto-deleted)
+        await delete_all_bot_messages(context, message.chat_id)
+        
+        # Send new success message (loading message already disappeared)
+        await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
         
         context.user_data.pop("loading_message_id", None)
         return True
@@ -3052,11 +3049,10 @@ async def perform_trade(
     except:
         loading_msg = f"⏳ Performing {trade_type} `{token_mint}` via {selected_dex.capitalize()}…"
     
-    # Send loading message and store its ID for editing
-    loading_response = await reply_ok_html(
+    # Send loading message without buttons that will auto-delete in 0.5s
+    loading_response = await reply_loading_html(
         message,
         loading_msg,
-        prev_cb=prev_cb,
         context=context,
     )
     context.user_data["loading_message_id"] = loading_response.message_id
@@ -3145,27 +3141,11 @@ async def perform_trade(
         except:
             error_msg = f"❌ An unexpected error occurred: {short_err_text(str(e))}"
             
-        # Clean up all tracked messages except the loading message (which we'll edit)
-        loading_msg_id = context.user_data.get("loading_message_id")
-        if loading_msg_id:
-            # Delete other tracked messages first (like token panel, etc.)
-            await delete_all_bot_messages_except_current(context, message.chat_id, loading_msg_id)
-            
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=message.chat_id,
-                    message_id=loading_msg_id,
-                    text=error_msg,
-                    parse_mode="HTML",
-                    reply_markup=back_markup(prev_cb)
-                )
-            except Exception:
-                # Fallback to reply if edit fails
-                await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
-        else:
-            # Clean up all tracked messages before showing error
-            await delete_all_bot_messages(context, message.chat_id)
-            await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        # Clean up all tracked messages (loading message already auto-deleted)
+        await delete_all_bot_messages(context, message.chat_id)
+        
+        # Send new error message (loading message already disappeared)
+        await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         
         context.user_data.pop("loading_message_id", None)
         return False
