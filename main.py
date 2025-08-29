@@ -1058,7 +1058,14 @@ async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = Fals
     refresh_indicator = "🔴 LIVE" if force_fresh else "📊"
 
     lines = []
-    lines.append(f"Swap <b>{display_name}</b> 📈")
+    # Make token symbol in panel header clickable (self-referencing for refresh/reload)
+    try:
+        from telegram.ext import ContextTypes
+        # We don't have context here, so we'll use bot username detection differently
+        symbol_clean = display_name.replace("$", "") if display_name.startswith("$") else display_name
+        lines.append(f"Swap <b>${symbol_clean}</b> 📈")
+    except:
+        lines.append(f"Swap <b>{display_name}</b> 📈")
     lines.append("")
     lines.append(f"<a href=\"{dexscreener_url(mint)}\">{mint[:4]}…{mint[-4:]}</a>")
     lines.append(f"• SOL Balance: {balance_text}")
@@ -1076,11 +1083,20 @@ async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = Fals
 # ================== Bot Handlers ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    
+    # Auto-delete the /start command message from user for cleaner UX
+    try:
+        if update.message:
+            await update.message.delete()
+    except Exception:
+        pass  # Ignore if can't delete (group chats, etc.)
 
-    # Deep-link payloads: trade_*, hide_*, sharepnl_*  (from assets text links)
+    # Universal Deep-link payloads system
     args = context.args if hasattr(context, "args") else []
     if args:
         payload = args[0]
+        
+        # Token Trading Deep Links
         if payload.startswith("trade_"):
             mint = payload.split("_", 1)[1]
             context.user_data["trade_mint"] = mint
@@ -1088,7 +1104,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             resp = await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context, user_id))
             await track_bot_message(context, resp.message_id)
             return
-        if payload.startswith("hide_"):
+            
+        # Asset Management Deep Links
+        elif payload.startswith("hide_"):
             mint = payload.split("_", 1)[1]
             st = context.user_data.setdefault("assets_state", {"page": 1, "sort": "value", "hide_dust": False, "dust_usd": 0.0, "detail": True, "hidden_mints": set()})
             hidden = set(st.get("hidden_mints", set()))
@@ -1096,9 +1114,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             st["hidden_mints"] = hidden
             await _render_assets_detailed_view(update.message, context)
             return
-        if payload.startswith("sharepnl_"):
+            
+        elif payload.startswith("sharepnl_"):
             mint = payload.split("_", 1)[1]
-            # Reuse the same builder; emulate callback flow
             data = await _build_pnl_card_data(user_id, mint)
             if not data:
                 resp = await update.message.reply_text("❌ No wallet found")
@@ -1117,6 +1135,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 resp = await update.message.reply_text(caption)
             await track_bot_message(context, resp.message_id)
+            return
+        
+        # Main Menu Deep Links
+        elif payload == "assets":
+            await handle_assets_direct(update, context)
+            return
+        elif payload == "wallet":
+            await handle_wallet_menu_direct(update, context)
+            return
+        elif payload == "settings":
+            await handle_menu_settings_direct(update, context)
+            return
+        elif payload == "copy":
+            await handle_copy_menu_direct(update, context)
+            return
+        elif payload == "buysell":
+            await buy_sell_direct(update, context)
+            return
+        elif payload == "pumpfun":
+            await pumpfun_trade_entry_direct(update, context)
             return
 
     # Default start menu
@@ -3521,11 +3559,17 @@ async def _handle_trade_response(
 
         sig = res.get("signature") or res.get("bundle")
         
-        # Get token symbol for better display
+        # Get token symbol for better display with deep link
         try:
             meta = await MetaCache.get(token_mint)
-            token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
-            success_msg = f"✅ {trade_type.capitalize()} {token_symbol} successful!"
+            symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+            bot_username = getattr(context.bot, "username", "") if context else ""
+            if bot_username:
+                trade_link = f"https://t.me/{bot_username}?start=trade_{token_mint}"
+                clickable_symbol = f"<a href='{trade_link}'><b>${symbol}</b></a>"
+                success_msg = f"✅ {trade_type.capitalize()} {clickable_symbol} successful!"
+            else:
+                success_msg = f"✅ {trade_type.capitalize()} ${symbol} successful!"
         except:
             success_msg = "✅ Swap successful!"
             
@@ -3540,11 +3584,17 @@ async def _handle_trade_response(
     else:
         err = res.get("error") if isinstance(res, dict) else res
         
-        # Get token symbol for better display in error message
+        # Get token symbol for better display in error message with deep link
         try:
             meta = await MetaCache.get(token_mint)
-            token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
-            error_msg = f"❌ {trade_type.capitalize()} {token_symbol} failed: {short_err_text(str(err))}"
+            symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+            bot_username = getattr(context.bot, "username", "") if context else ""
+            if bot_username:
+                trade_link = f"https://t.me/{bot_username}?start=trade_{token_mint}"
+                clickable_symbol = f"<a href='{trade_link}'><b>${symbol}</b></a>"
+                error_msg = f"❌ {trade_type.capitalize()} {clickable_symbol} failed: {short_err_text(str(err))}"
+            else:
+                error_msg = f"❌ {trade_type.capitalize()} ${symbol} failed: {short_err_text(str(err))}"
         except:
             error_msg = f"❌ Swap failed: {short_err_text(str(err))}"
             
@@ -3613,11 +3663,17 @@ async def perform_trade(
         await reply_err_html(message, prep["message"], prev_cb=prev_cb, context=context)
         return False
 
-    # Get token symbol for better display in loading message
+    # Get token symbol for better display in loading message with deep link
     try:
         meta = await MetaCache.get(token_mint)
-        token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
-        loading_msg = f"⏳ Performing {trade_type} {token_symbol} via {selected_dex.capitalize()}…"
+        symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+        bot_username = getattr(context.bot, "username", "") if context else ""
+        if bot_username:
+            trade_link = f"https://t.me/{bot_username}?start=trade_{token_mint}"
+            clickable_symbol = f"<a href='{trade_link}'><b>${symbol}</b></a>"
+            loading_msg = f"⏳ Performing {trade_type} {clickable_symbol} via {selected_dex.capitalize()}…"
+        else:
+            loading_msg = f"⏳ Performing {trade_type} ${symbol} via {selected_dex.capitalize()}…"
     except:
         loading_msg = f"⏳ Performing {trade_type} `{token_mint}` via {selected_dex.capitalize()}…"
     
@@ -3735,11 +3791,17 @@ async def perform_trade(
         return success
 
     except Exception as e:
-        # Get token symbol for better display in error message
+        # Get token symbol for better display in error message with deep link
         try:
             meta = await MetaCache.get(token_mint)
-            token_symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
-            error_msg = f"❌ {trade_type.capitalize()} {token_symbol} failed: {short_err_text(str(e))}"
+            symbol = (meta.get("symbol") or "").strip() or (meta.get("name") or "").strip() or f"{token_mint[:6].upper()}"
+            bot_username = getattr(context.bot, "username", "") if context else ""
+            if bot_username:
+                trade_link = f"https://t.me/{bot_username}?start=trade_{token_mint}"
+                clickable_symbol = f"<a href='{trade_link}'><b>${symbol}</b></a>"
+                error_msg = f"❌ {trade_type.capitalize()} {clickable_symbol} failed: {short_err_text(str(e))}"
+            else:
+                error_msg = f"❌ {trade_type.capitalize()} ${symbol} failed: {short_err_text(str(e))}"
         except:
             error_msg = f"❌ An unexpected error occurred: {short_err_text(str(e))}"
             
@@ -4196,6 +4258,24 @@ def main() -> None:
     stop_event = asyncio.Event()
 
     async def _on_start(app: Application):
+        # Initialize bot username cache
+        try:
+            global _BOT_USERNAME
+            bot_info = await app.bot.get_me()
+            _BOT_USERNAME = bot_info.username
+            print(f"Bot username initialized: @{_BOT_USERNAME}")
+        except Exception as e:
+            print(f"Failed to get bot username: {e}")
+        
+        # Hide /start command from menu by setting empty command list
+        try:
+            from telegram import BotCommand
+            # Only show admin commands if needed, or leave empty to hide all
+            await app.bot.set_my_commands([])
+            print("Bot commands hidden from menu")
+        except Exception as e:
+            print(f"Failed to set bot commands: {e}")
+        
         asyncio.create_task(copytrading_loop(stop_event))
         asyncio.create_task(DexCache.loop(stop_event))
 
