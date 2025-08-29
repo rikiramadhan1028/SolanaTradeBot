@@ -218,6 +218,7 @@ class DexCache:
     TTL = 3.0
     _store: dict[str, tuple[float, dict]] = {}
     _watch: set[str] = set()
+    _refreshing: set[str] = set()  # Track ongoing refreshes to prevent duplicates
 
     @classmethod
     async def _fetch_bulk(cls, mints: list[str]) -> dict[str, dict]:
@@ -257,6 +258,23 @@ class DexCache:
         return out
 
     @classmethod
+    async def force_refresh(cls, mint: str) -> dict:
+        """Force refresh a single mint for user-triggered refresh. Returns fresh data immediately."""
+        if mint in cls._refreshing:
+            # Already refreshing, wait briefly and return cached if available
+            await asyncio.sleep(0.1)
+            hit = cls._store.get(mint)
+            if hit:
+                return hit[1]
+        
+        cls._refreshing.add(mint)
+        try:
+            result = await cls._fetch_bulk([mint])
+            return result.get(mint, {"price": 0.0, "lp": 0.0, "mc": 0.0})
+        finally:
+            cls._refreshing.discard(mint)
+
+    @classmethod
     async def get_bulk(cls, mints: list[str], *, prefer_cache: bool = True) -> dict[str, dict]:
         """Kembalikan dict mint->pack (price/lp/mc). Ambil cache < TTL, sisanya fetch sekali (batch)."""
         now = time.time()
@@ -276,14 +294,14 @@ class DexCache:
 
     @classmethod
     async def loop(cls, stop_event: asyncio.Event):
-        """Warm cache setiap 2s untuk semua mint yang pernah dirender."""
+        """Warm cache setiap 1s untuk semua mint yang pernah dirender - ultra-fast refresh."""
         while not stop_event.is_set():
             try:
                 if cls._watch:
                     await cls._fetch_bulk(list(cls._watch))
             except Exception:
                 pass
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)  # Faster refresh for real-time updates
 
 # ============ DEX & Pump.fun via Node microservice ============
 from services.trade_service import (
@@ -949,34 +967,45 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     wallet_info = database.get_user_wallet(user_id)
     addr = wallet_info.get("address", "--") if wallet_info else "--"
 
-    # SOL Balance
+    # SOL Balance & Token Balance for PnL
     balance_text = "N/A"
+    token_balance = 0.0
     if addr and addr != "--":
         try:
             bal = await svc_get_sol_balance(addr)
             balance_text = f"{bal:.4f} SOL"
+            # Get token balance for PnL calculation
+            token_balance = await svc_get_token_balance(addr, mint)
         except Exception:
             balance_text = "Error"
 
-    # Price + meta
+    # Price + meta using FAST cache system
     price_text = "N/A"
     mc_text = "N/A"
     lp_text = "N/A"
     display_name = None
 
-    ds = await get_dexscreener_stats(mint)
-    if ds:
-        symbol = (ds.get("symbol") or "") or ""
-        name = (ds.get("name") or "") or ""
+    # Use optimized cache system for instant refresh
+    meta = await MetaCache.get(mint)
+    pack = await DexCache.get_bulk([mint], prefer_cache=True)
+    
+    if pack and pack.get(mint):
+        data = pack[mint]
+        price_text = format_usd(data.get("price", 0))
+        mc_text = format_usd(data.get("mc", 0))
+        lp_text = format_usd(data.get("lp", 0))
+    
+    # Get symbol/name from meta cache
+    if meta:
+        symbol = (meta.get("symbol") or "") or ""
+        name = (meta.get("name") or "") or ""
         if symbol:
             display_name = symbol if symbol.startswith("$") else f"${symbol}"
         elif name:
             display_name = name
 
-        price_text = format_usd(ds.get("priceUsd") or 0)
-        mc_text    = format_usd(ds.get("fdvUsd") or 0)
-        lp_text    = format_usd(ds.get("liquidityUsd") or 0)
-    else:
+    # Fallback to old methods only if cache completely fails
+    if price_text == "N/A" or price_text == "$0.00":
         price_data = await get_token_price(mint)
         if price_data["price"] <= 0:
             price_data = await get_token_price_from_raydium(mint)
@@ -989,18 +1018,46 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     if not display_name:
         display_name = f"{mint[:4]}…{mint[-4:]}"
 
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    # Real-time PnL calculation if user holds tokens
+    pnl_line = ""
+    if token_balance > 0 and pack and pack.get(mint):
+        try:
+            # Get position data from database
+            positions = database.get_user_tokens(user_id)
+            position = next((p for p in positions if p.get("mint") == mint), None)
+            
+            if position and position.get("avg_entry_price_usd"):
+                current_price = pack[mint].get("price", 0)
+                avg_entry_price = position["avg_entry_price_usd"]
+                
+                if current_price > 0 and avg_entry_price > 0:
+                    current_value_usd = token_balance * current_price
+                    entry_value_usd = token_balance * avg_entry_price
+                    pnl_usd = current_value_usd - entry_value_usd
+                    pnl_pct = (pnl_usd / entry_value_usd) if entry_value_usd > 0 else 0
+                    
+                    pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+                    pnl_line = f"• PnL: {pnl_emoji} {pnl_pct*100:+.1f}% ({format_usd(pnl_usd)})"
+        except Exception:
+            pass
+
+    # High-precision timestamp for real-time feedback
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-2]  # Show milliseconds
 
     lines = []
     lines.append(f"Swap <b>{display_name}</b> 📈")
     lines.append("")
     lines.append(f"<a href=\"{dexscreener_url(mint)}\">{mint[:4]}…{mint[-4:]}</a>")
     lines.append(f"• SOL Balance: {balance_text}")
+    if token_balance > 0:
+        lines.append(f"• Token Balance: {token_balance:.4f}")
     lines.append(f"• Price: {price_text}   LP: {lp_text}   MC: {mc_text}")
+    if pnl_line:
+        lines.append(pnl_line)
     lines.append("• Raydium CPMM")
     lines.append(f'• <a href="{dexscreener_url(mint)}">DEX Screener</a>')
     lines.append("")
-    lines.append(f"🕒 Last updated: {ts}")
+    lines.append(f"🕒 Last updated: {ts} UTC")
     return "\n".join(lines)
 
 # ================== Bot Handlers ==================
@@ -2935,14 +2992,30 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
 
 async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
-    await q.answer()
+    
     mint = context.user_data.get("token_address")
     if not mint:
+        await q.answer("No token selected")
         return await handle_back_to_buy_sell_menu(update, context)
-    panel = await build_token_panel(q.from_user.id, mint)
-    await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
-    # Track this edited message for cleanup
-    await track_bot_message(context, q.message.message_id)
+    
+    # Immediate feedback - show refresh is happening
+    await q.answer("🔄 Refreshing...", show_alert=False)
+    
+    try:
+        # Force refresh for instant real-time data
+        await DexCache.force_refresh(mint)
+        
+        # Build panel with fresh data
+        panel = await build_token_panel(q.from_user.id, mint)
+        
+        # Update message with fresh data
+        await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+        # Track this edited message for cleanup
+        await track_bot_message(context, q.message.message_id)
+    except Exception as e:
+        # Handle any errors gracefully
+        await q.answer("⚠️ Refresh failed, try again", show_alert=False)
+        
     return AWAITING_TRADE_ACTION
 
 async def handle_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
