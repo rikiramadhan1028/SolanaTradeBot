@@ -783,24 +783,18 @@ async def handle_callback_with_cleanup(update: Update, context: ContextTypes.DEF
 def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
         [
-            InlineKeyboardButton("⚡ Import Wallet", callback_data="import_wallet"),
-            InlineKeyboardButton("🏆 Invite Friends", callback_data="invite_friends"),
-        ],
-        [
             InlineKeyboardButton("💰 Buy/Sell", callback_data="buy_sell"),
             InlineKeyboardButton("🧾 Asset", callback_data="view_assets"),
         ],
         [
-            InlineKeyboardButton("📋 Copy Trading", callback_data="copy_menu"),
             InlineKeyboardButton("📉 Limit Order", callback_data="limit_order"),
-            InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell"),
+            InlineKeyboardButton("🏆 Invite Friends", callback_data="invite_friends"),
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"),
             InlineKeyboardButton("👛 Wallet", callback_data="menu_wallet"),
         ],
         [
-            InlineKeyboardButton("🌐 Language", callback_data="change_language"),
             InlineKeyboardButton("❓ Help", callback_data="menu_help"),
         ],
     ]
@@ -906,11 +900,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMa
     sell_bps = int(context.user_data.get("slippage_bps_sell", 500)) # default 5%
     kb: list[list[InlineKeyboardButton]] = []
     kb.append([
-        InlineKeyboardButton("Smart Money", callback_data="noop_smart"),
         InlineKeyboardButton("↻ Refresh", callback_data="token_panel_refresh"),
-    ])
-    kb.append([
-        InlineKeyboardButton("✅ Swap", callback_data="noop_swap"),
         InlineKeyboardButton("Limit Orders", callback_data="dummy_limit_orders"),
     ])
     kb.append([
@@ -2475,6 +2465,7 @@ def _settings_keyboard():
         [InlineKeyboardButton("🟠 TURBO", callback_data="set_cu:turbo"), 
          InlineKeyboardButton("🔥 ULTRA", callback_data="set_cu:ultra")],
         [InlineKeyboardButton("✏️ Custom", callback_data="set_cu:custom")],
+        [InlineKeyboardButton("🌐 Language", callback_data="change_language")],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ])
 
@@ -2494,6 +2485,7 @@ async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🟠 TURBO", callback_data="set_cu:turbo"), 
          InlineKeyboardButton("🔥 ULTRA", callback_data="set_cu:ultra")],
         [InlineKeyboardButton("✏️ Custom", callback_data="set_cu:custom")],
+        [InlineKeyboardButton("🌐 Language", callback_data="change_language")],
         [InlineKeyboardButton("⬅️ Back", callback_data="back_to_main_menu")]
     ]
     
@@ -2627,12 +2619,9 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
 
     keyboard = [
-        [InlineKeyboardButton("Buy", callback_data="dummy_buy"), InlineKeyboardButton("Sell", callback_data="dummy_sell")],
-        [InlineKeyboardButton("✈️ Copy Trade", callback_data="copy_menu")],
         [InlineKeyboardButton("🤖 Auto Trade - Pump.fun", callback_data="pumpfun_trade")],
-        [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders"), InlineKeyboardButton("Auto Sell", callback_data="dummy_auto_sell")],
-        [InlineKeyboardButton("📈 Positions", callback_data="dummy_positions"), InlineKeyboardButton("👛 Wallet", callback_data="dummy_wallet"), InlineKeyboardButton("❓ Help", callback_data="dummy_help")],
-        [InlineKeyboardButton("💵 Smart Wallet", callback_data="dummy_smart_wallet"), InlineKeyboardButton("🖥️ Extension", callback_data="dummy_extension")],
+        [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders")],
+        [InlineKeyboardButton("📈 Positions", callback_data="dummy_positions"), InlineKeyboardButton("👛 Wallet", callback_data="dummy_wallet")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="dummy_settings"), InlineKeyboardButton("💰 Referrals", callback_data="dummy_referrals")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
     ]
