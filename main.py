@@ -259,20 +259,20 @@ class DexCache:
 
     @classmethod
     async def force_refresh(cls, mint: str) -> dict:
-        """Force refresh a single mint for user-triggered refresh. Returns fresh data immediately."""
-        if mint in cls._refreshing:
-            # Already refreshing, wait briefly and return cached if available
-            await asyncio.sleep(0.1)
+        """Force refresh a single mint for user-triggered refresh. ALWAYS fetches fresh data, ignores cache."""
+        # Don't check _refreshing - allow concurrent requests for different users
+        # Each user's refresh should get truly fresh data
+        
+        try:
+            # ALWAYS fetch fresh data, bypassing all cache logic
+            result = await cls._fetch_bulk([mint])
+            return result.get(mint, {"price": 0.0, "lp": 0.0, "mc": 0.0})
+        except Exception:
+            # Fallback to cache only if network fails
             hit = cls._store.get(mint)
             if hit:
                 return hit[1]
-        
-        cls._refreshing.add(mint)
-        try:
-            result = await cls._fetch_bulk([mint])
-            return result.get(mint, {"price": 0.0, "lp": 0.0, "mc": 0.0})
-        finally:
-            cls._refreshing.discard(mint)
+            return {"price": 0.0, "lp": 0.0, "mc": 0.0}
 
     @classmethod
     async def get_bulk(cls, mints: list[str], *, prefer_cache: bool = True) -> dict[str, dict]:
@@ -962,7 +962,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> In
     ])
     return InlineKeyboardMarkup(kb)
 
-async def build_token_panel(user_id: int, mint: str) -> str:
+async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = False) -> str:
     """Compact summary with price & LP from Dexscreener; unknown -> N/A."""
     wallet_info = database.get_user_wallet(user_id)
     addr = wallet_info.get("address", "--") if wallet_info else "--"
@@ -985,15 +985,24 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     lp_text = "N/A"
     display_name = None
 
-    # Use optimized cache system for instant refresh
-    meta = await MetaCache.get(mint)
-    pack = await DexCache.get_bulk([mint], prefer_cache=True)
+    # Get price data - either fresh or cached
+    current_price_data = None
+    meta = await MetaCache.get(mint)  # Meta rarely changes, cache OK
     
-    if pack and pack.get(mint):
-        data = pack[mint]
-        price_text = format_usd(data.get("price", 0))
-        mc_text = format_usd(data.get("mc", 0))
-        lp_text = format_usd(data.get("lp", 0))
+    if force_fresh:
+        # Get absolutely fresh data for user-triggered refresh
+        current_price_data = await DexCache.force_refresh(mint)  # ALWAYS fresh price data
+    else:
+        # Use optimized cache system for normal loading
+        pack = await DexCache.get_bulk([mint], prefer_cache=True)
+        if pack and pack.get(mint):
+            current_price_data = pack[mint]
+    
+    # Format price data
+    if current_price_data:
+        price_text = format_usd(current_price_data.get("price", 0))
+        mc_text = format_usd(current_price_data.get("mc", 0))
+        lp_text = format_usd(current_price_data.get("lp", 0))
     
     # Get symbol/name from meta cache
     if meta:
@@ -1020,14 +1029,14 @@ async def build_token_panel(user_id: int, mint: str) -> str:
 
     # Real-time PnL calculation if user holds tokens
     pnl_line = ""
-    if token_balance > 0 and pack and pack.get(mint):
+    if token_balance > 0 and current_price_data:
         try:
             # Get position data from database
             positions = database.get_user_tokens(user_id)
             position = next((p for p in positions if p.get("mint") == mint), None)
             
             if position and position.get("avg_entry_price_usd"):
-                current_price = pack[mint].get("price", 0)
+                current_price = current_price_data.get("price", 0)
                 avg_entry_price = position["avg_entry_price_usd"]
                 
                 if current_price > 0 and avg_entry_price > 0:
@@ -1043,6 +1052,9 @@ async def build_token_panel(user_id: int, mint: str) -> str:
 
     # High-precision timestamp for real-time feedback
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-2]  # Show milliseconds
+    
+    # Add refresh indicator for spam-click feedback
+    refresh_indicator = "🔴 LIVE" if force_fresh else "📊"
 
     lines = []
     lines.append(f"Swap <b>{display_name}</b> 📈")
@@ -1057,7 +1069,7 @@ async def build_token_panel(user_id: int, mint: str) -> str:
     lines.append("• Raydium CPMM")
     lines.append(f'• <a href="{dexscreener_url(mint)}">DEX Screener</a>')
     lines.append("")
-    lines.append(f"🕒 Last updated: {ts} UTC")
+    lines.append(f"🕒 {refresh_indicator} Updated: {ts} UTC")
     return "\n".join(lines)
 
 # ================== Bot Handlers ==================
@@ -2998,15 +3010,13 @@ async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAU
         await q.answer("No token selected")
         return await handle_back_to_buy_sell_menu(update, context)
     
-    # Immediate feedback - show refresh is happening
-    await q.answer("🔄 Refreshing...", show_alert=False)
+    # Immediate feedback with unique ID - show refresh is happening
+    refresh_id = str(int(time.time() * 1000))[-4:]  # Last 4 digits of timestamp
+    await q.answer(f"🔄 Refreshing #{refresh_id}...", show_alert=False)
     
     try:
-        # Force refresh for instant real-time data
-        await DexCache.force_refresh(mint)
-        
-        # Build panel with fresh data
-        panel = await build_token_panel(q.from_user.id, mint)
+        # Build panel with FORCED fresh data - no cache used
+        panel = await build_token_panel(q.from_user.id, mint, force_fresh=True)
         
         # Update message with fresh data
         await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
