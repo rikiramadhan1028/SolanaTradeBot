@@ -3199,15 +3199,28 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
             context.user_data["slippage_bps_buy"] = bps
         context.user_data.pop("awaiting_slippage_input", None)
         context.user_data.pop("slippage_target", None)
+        # Clean up bot messages first
+        chat_id = update.effective_chat.id
+        await ensure_message_cleanup_on_user_action(context, chat_id)
+        
         panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""))
-        await update.message.reply_html(
-            f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.",
+        
+        # Show success message with updated panel in ONE message
+        success_msg = f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.\n\n{panel}"
+        response = await update.message.reply_html(
+            success_msg,
             reply_markup=token_panel_keyboard(context),
         )
-        response = await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
         await track_bot_message(context, response.message_id)
+        
+        # Schedule cleanup for success message
+        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 3))
         return AWAITING_TRADE_ACTION
     except Exception:
+        # Clean up bot messages on error too
+        chat_id = update.effective_chat.id
+        await ensure_message_cleanup_on_user_action(context, chat_id)
+        
         response = await update.message.reply_text(
             "❌ Invalid number. Enter % like `5` or `18`.",
             reply_markup=back_markup("back_to_token_panel"),
