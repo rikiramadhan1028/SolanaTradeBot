@@ -519,19 +519,19 @@ async def reply_ok_html(message, text: str, prev_cb: str | None = None, signatur
     return response
 
 async def reply_loading_html(message, text: str, context: ContextTypes.DEFAULT_TYPE = None):
-    """Send loading message without buttons and auto-delete after 0.8 seconds"""
+    """Send loading message without buttons and auto-delete after 0.5 seconds for instant UX"""
     # Send message without any buttons
     response = await message.reply_html(text)
     if context:
         await track_bot_message(context, response.message_id)
-        # Auto-delete loading message after 0.8 seconds
+        # Auto-delete loading message after 0.5 seconds for instant results
         chat_id = message.chat_id
         asyncio.create_task(auto_delete_loading_message(context, chat_id, response.message_id))
     return response
 
 async def auto_delete_loading_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    """Delete loading message after 0.8 seconds"""
-    await asyncio.sleep(0.8)  # Wait 0.8 seconds
+    """Delete loading message after 0.5 seconds for instant UX"""
+    await asyncio.sleep(0.5)  # Wait 0.5 seconds for max 1s total UX
     try:
         bot = context.bot
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -2947,13 +2947,10 @@ async def _handle_trade_response(
         except:
             success_msg = "✅ Swap successful!"
             
-        # Wait for loading message to disappear, then show success (total ~1-2 seconds)
-        await asyncio.sleep(1.0)  # Wait 1 second for smooth transition
-        
         # Clean up all tracked messages (loading message already auto-deleted)
         await delete_all_bot_messages(context, message.chat_id)
         
-        # Send new success message (loading message already disappeared)
+        # Send success message instantly after loading disappears  
         await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
         
         context.user_data.pop("loading_message_id", None)
@@ -2969,22 +2966,11 @@ async def _handle_trade_response(
         except:
             error_msg = f"❌ Swap failed: {short_err_text(str(err))}"
             
-        # Edit the loading message instead of creating a new one
-        loading_msg_id = context.user_data.get("loading_message_id")
-        if loading_msg_id:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=message.chat_id,
-                    message_id=loading_msg_id,
-                    text=error_msg,
-                    parse_mode="HTML",
-                    reply_markup=back_markup(prev_cb)
-                )
-            except Exception:
-                # Fallback to reply if edit fails
-                await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
-        else:
-            await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+        # Clean up all tracked messages (loading message already auto-deleted)
+        await delete_all_bot_messages(context, message.chat_id)
+        
+        # Send error message instantly after loading disappears
+        await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         
         context.user_data.pop("loading_message_id", None)
         return False
@@ -3052,7 +3038,7 @@ async def perform_trade(
     except:
         loading_msg = f"⏳ Performing {trade_type} `{token_mint}` via {selected_dex.capitalize()}…"
     
-    # Send loading message without buttons that will auto-delete in 0.8s
+    # Send loading message without buttons that will auto-delete in 0.5s for instant UX
     loading_response = await reply_loading_html(
         message,
         loading_msg,
@@ -3144,13 +3130,10 @@ async def perform_trade(
         except:
             error_msg = f"❌ An unexpected error occurred: {short_err_text(str(e))}"
             
-        # Wait for loading message to disappear, then show error (total ~1-2 seconds)  
-        await asyncio.sleep(1.0)  # Wait 1 second for smooth transition
-        
         # Clean up all tracked messages (loading message already auto-deleted)
         await delete_all_bot_messages(context, message.chat_id)
         
-        # Send new error message (loading message already disappeared)
+        # Send error message instantly after loading disappears
         await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
         
         context.user_data.pop("loading_message_id", None)
