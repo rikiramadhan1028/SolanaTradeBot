@@ -2770,14 +2770,18 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
     from cu_config import PRIORITY_FEE_SOL_DEFAULT
     if fee_ui <= PRIORITY_FEE_SOL_DEFAULT:
         return None
-    print(f"Attempting to send {fee_ui:.6f} SOL fee ({reason}) to {FEE_WALLET}")
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
-    if isinstance(tx, str) and not tx.lower().startswith("error"):
-        print(f"✅ Platform fee successful. Signature: {tx}")
-        return tx
-    else:
-        print(f"⚠️ Platform fee transfer failed: {tx}")
+    return tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
+
+async def _send_fee_sol_direct(private_key: str, fee_amount: float, reason: str):
+    """Send fee directly without calculating percentage"""
+    if not FEE_ENABLED or fee_amount <= 0:
         return None
+    from cu_config import PRIORITY_FEE_SOL_DEFAULT
+    if fee_amount <= PRIORITY_FEE_SOL_DEFAULT:
+        return None
+    tx = solana_client.send_sol(private_key, FEE_WALLET, fee_amount)
+    return tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
 
 
 async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int, user_id: str = None) -> dict:
@@ -2821,7 +2825,7 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
 
     # Send fee now, before the swap
     if FEE_ENABLED and fee_amount_ui > 0:
-        await _send_fee_sol_if_any(wallet["private_key"], total_sol_to_spend, "BUY")
+        await _send_fee_sol_direct(wallet["private_key"], fee_amount_ui, "BUY")
 
     return {
         "status": "ok",
@@ -2879,8 +2883,8 @@ async def _handle_sell_fee(wallet: dict, pre_sol_ui: float):
         if delta_ui > 0:
             await _send_fee_sol_if_any(wallet["private_key"], delta_ui, "SELL")
     except Exception as e:
-        # Log this error but don't bother the user with a fee-related failure message
-        print(f"⚠️ Fee check/send failed after sell: {e}")
+        # Silently handle fee-related failures
+        pass
 
 # ganti/buat versi ini
 async def _handle_trade_response(
@@ -3123,7 +3127,7 @@ async def perform_trade(
                 if delta_ui > 0:
                     await _send_fee_sol_if_any(wallet["private_key"], delta_ui, "SELL")
             except Exception as e:
-                print(f"⚠️ Fee check/send failed after sell: {e}")
+                pass
 
         return success
 
