@@ -1271,8 +1271,8 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         indicator = "📈" if (pnl_pct is not None and pnl_pct >= 0) else ("📉" if pnl_pct is not None else "📊")
         danger = "🟩" if (pnl_pct is not None and pnl_pct >= 0) else ("🟥" if pnl_pct is not None else "")
 
-        lines.append(f"<b>${sym}</b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
-                     f"[<a href='tg://callback?data=assets_hide_{mint}'>hide</a>]")  # label saja, tombol real di bawah
+        lines.append(f"<b><a href='tg://callback?data=trade_token_{mint}'>${sym}</a></b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
+                     f"[<a href='tg://callback?data=assets_hide_{mint}'>hide</a>]")  # Make symbol clickable to trade
         lines.append(f"<code>{mint}</code>")
         if pnl_pct is not None:
             lines.append(f"• PNL: {format_pct(pnl_pct)} "
@@ -1311,21 +1311,12 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         InlineKeyboardButton("📸 Share Portfolio", callback_data="assets_share_portfolio"),
     ]
     row2 = [b for b in (prev_btn, InlineKeyboardButton("↻ Refresh", callback_data="assets_refresh"), next_btn) if b]
-    # Add individual trade buttons for each token
-    card_buttons = []
-    for x in page_items:
-        mint = x["mint"]
-        sym = x["symbol"]
-        card_buttons.append([
-            InlineKeyboardButton(f"📈 Trade ${sym}", callback_data=f"trade_{mint}"),
-            InlineKeyboardButton(f"📊 Share ${sym}", callback_data=f"assets_share_pnl_{mint}"),
-        ])
+    # Remove individual trade and share buttons - now using clickable symbols and inline links
 
     back = [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")]
 
     kb_rows = [row0, row1, row1_5]
     if row2: kb_rows.append(row2)
-    kb_rows += card_buttons
     kb_rows.append(back)
     keyboard = InlineKeyboardMarkup(kb_rows)
 
@@ -1382,9 +1373,14 @@ async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_
         return  # Don't re-render assets view
         
     elif data.startswith("trade_"):
-        mint = data.split("_", 1)[1]
+        # Handle both "trade_{mint}" and "trade_token_{mint}" patterns
+        if data.startswith("trade_token_"):
+            mint = data.split("_", 2)[2]  # Extract mint from "trade_token_{mint}"
+        else:
+            mint = data.split("_", 1)[1]  # Extract mint from "trade_{mint}"
+        
         # Navigate to trade screen for this token
-        context.user_data["trade_mint"] = mint
+        context.user_data["trade_mint"] = mint  # Set mint for trading
         await handle_trade(q, context)
         return  # Don't re-render assets view
         
@@ -1443,25 +1439,56 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
                     pnl_pct = (pnl_usd / cost_usd) if cost_usd > 0 else 0
         
         if pnl_pct is not None:
-            # Get appropriate image for PnL level
-            image_url = get_pnl_image_url(pnl_pct)
+            # Get current token balance for detailed PnL card
+            tokens = await svc_get_token_balances(addr, min_amount=0.0)
+            current_amount = 0
+            for t in tokens:
+                if (t.get("mint") or t.get("mintAddress")) == mint:
+                    current_amount = float(t.get("amount") or t.get("uiAmount") or 0)
+                    break
             
-            # Create shareable message with image
+            # Calculate detailed PnL data
             pnl_text = f"{pnl_pct*100:+.1f}%" if pnl_pct else "0.0%"
-            emoji = "🚀" if pnl_pct >= 0.5 else "📈" if pnl_pct >= 0 else "📉" if pnl_pct >= -0.25 else "💀"
+            avg_entry_price = pos.get('avg_entry_price_usd', 0)
+            total_invested = current_amount * avg_entry_price if avg_entry_price > 0 else 0
+            current_value = current_amount * price
             
-            caption = f"{emoji} <b>${symbol} PnL: {pnl_text}</b>\n\n"
-            caption += f"💰 P&L: {format_usd(pnl_usd)}\n"
-            caption += f"📊 Token: <code>{mint}</code>\n"
-            caption += f"💎 Current Price: {format_usd(price)}\n"
-            caption += f"🎯 Entry Price: {format_usd(pos.get('avg_entry_price_usd', 0))}\n\n"
-            caption += f"🤖 <i>Powered by RokuTrade</i>"
+            # Create PnL card similar to the example
+            card = "🎯 <b>PnL CARD</b> 🎯\n"
+            card += "━━━━━━━━━━━━━━━━━━\n\n"
             
-            # Send photo with caption
-            await q.message.reply_photo(
-                photo=image_url,
-                caption=caption,
-                parse_mode="HTML"
+            # Token info header
+            card += f"<b>${symbol}</b>\n"
+            card += f"<code>{mint[:8]}...{mint[-8:]}</code>\n\n"
+            
+            # Main PnL display (large)
+            if pnl_pct >= 0:
+                emoji = "🟢" if pnl_pct < 0.25 else "🚀" if pnl_pct >= 0.5 else "📈"
+                card += f"{emoji} <b>{pnl_text}</b> {emoji}\n\n"
+            else:
+                emoji = "🟡" if pnl_pct >= -0.25 else "🔴" if pnl_pct >= -0.5 else "💀"
+                card += f"{emoji} <b>{pnl_text}</b> {emoji}\n\n"
+            
+            # Investment details
+            card += f"💎 <b>Total Invested</b>\n{format_usd(total_invested)}\n\n"
+            card += f"💰 <b>Current Value</b>\n{format_usd(current_value)}\n\n"
+            
+            pnl_label = "Profit" if pnl_usd >= 0 else "Loss"
+            card += f"{'📈' if pnl_usd >= 0 else '📉'} <b>{pnl_label}</b>\n{format_usd(abs(pnl_usd))}\n\n"
+            
+            # Additional info
+            card += f"📊 <b>Entry Price:</b> {format_usd(avg_entry_price)}\n"
+            card += f"💎 <b>Current Price:</b> {format_usd(price)}\n"
+            card += f"🪙 <b>Balance:</b> {current_amount:,.4f}\n\n"
+            
+            card += "━━━━━━━━━━━━━━━━━━\n"
+            card += "🤖 <i>RokuTrade - Solana Trading Bot</i>"
+            
+            # Send the PnL card
+            await q.message.reply_text(
+                card,
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
         else:
             response = await q.message.reply_text("❌ No PnL data available for this token")
@@ -2462,6 +2489,11 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chat_id = update.effective_chat.id
     user_id = query.from_user.id
     user_mention = query.from_user.mention_html()
+    
+    # Clear hidden assets when returning to main menu
+    if "assets_state" in context.user_data:
+        context.user_data["assets_state"]["hidden_mints"] = set()
+    
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     
     try:
