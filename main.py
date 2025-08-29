@@ -2572,6 +2572,28 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get("awaiting_slippage_input"):
         await handle_set_slippage_value(update, context)
         return
+    
+    # Handle custom buy amount from deep link trading panel
+    if (context.user_data.get("trade_type") == "buy" and 
+        context.user_data.get("amount_type") == "sol" and 
+        context.user_data.get("token_address")):
+        try:
+            amount = float(text)
+            if amount <= 0:
+                raise ValueError("Amount must be positive")
+            
+            # Perform the trade
+            result = await perform_trade(update, context, amount)
+            return
+        except ValueError:
+            response = await update.message.reply_text(
+                "❌ Please enter a valid SOL amount (e.g., 1.5)",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data="back_to_token_panel")
+                ]])
+            )
+            await track_bot_message(context, response.message_id)
+            return
 
     await update.message.reply_text(
         "❌ Unrecognized command. Please use `import`, `send`, or `sendtoken`.",
@@ -2651,10 +2673,87 @@ async def handle_back_to_token_panel_outside_conv(update: Update, context: Conte
     context.user_data["in_trade_conversation"] = True
     
     try:
-        await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+        await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context, q.from_user.id), parse_mode="HTML")
     except Exception:
         # Fallback: send new message if edit fails
-        await q.message.reply_html(panel, reply_markup=token_panel_keyboard(context))
+        await q.message.reply_html(panel, reply_markup=token_panel_keyboard(context, q.from_user.id))
+
+async def handle_buy_sell_action_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle trading buttons outside conversation context (from deep links)"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Ensure we have token_address in context for trading
+    mint = context.user_data.get("trade_mint") or context.user_data.get("token_address")
+    if not mint:
+        await query.edit_message_text(
+            "❌ No token selected for trading.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back to Assets", callback_data="view_assets")
+            ]])
+        )
+        return
+    
+    # Set up context for trading
+    context.user_data["token_address"] = mint
+    user_id = query.from_user.id
+    action = query.data
+    
+    # Handle different trading actions
+    if action.startswith("buy_fixed_"):
+        amount_str = action.split("_")[-1]
+        amount = float(amount_str)
+        context.user_data["trade_type"] = "buy"
+        context.user_data["amount_type"] = "sol"
+        
+        # Perform trade immediately
+        result = await perform_trade(update, context, amount)
+        return
+        
+    elif action == "buy_custom":
+        context.user_data["trade_type"] = "buy" 
+        context.user_data["amount_type"] = "sol"
+        await query.edit_message_text(
+            "Please enter the amount of SOL you want to buy with:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="back_to_token_panel")
+            ]])
+        )
+        return
+        
+    elif action.startswith("sell_pct_"):
+        percentage_str = action.split("_")[-1]
+        percentage = int(percentage_str)
+        context.user_data["trade_type"] = "sell"
+        context.user_data["amount_type"] = "percentage"
+        
+        # Perform trade immediately 
+        result = await perform_trade(update, context, percentage)
+        return
+
+async def handle_refresh_token_panel_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle token panel refresh outside conversation context"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Get token mint from context
+    mint = context.user_data.get("trade_mint") or context.user_data.get("token_address")
+    if not mint:
+        await query.edit_message_text("❌ No token to refresh.")
+        return
+        
+    try:
+        user_id = query.from_user.id
+        # Force fresh data refresh
+        panel = await build_token_panel(user_id, mint, force_fresh=True)
+        
+        # Update message with fresh data
+        await query.edit_message_text(panel, reply_markup=token_panel_keyboard(context, user_id), parse_mode="HTML")
+        # Track this edited message for cleanup
+        await track_bot_message(context, query.message.message_id)
+    except Exception as e:
+        print(f"Error refreshing token panel: {e}")
+        await query.edit_message_text("❌ Error refreshing token panel.")
 
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -4027,6 +4126,10 @@ def main() -> None:
     # --- Back button handlers (needed outside conversations) ---
     application.add_handler(CallbackQueryHandler(handle_back_to_token_panel_outside_conv, pattern="^back_to_token_panel$"))
     application.add_handler(CallbackQueryHandler(pumpfun_back_to_panel_outside_conv, pattern="^pumpfun_back_to_panel$"))
+    
+    # --- Trading button handlers (needed outside conversations for deep links) ---
+    application.add_handler(CallbackQueryHandler(handle_buy_sell_action_outside_conv, pattern="^(buy_fixed_.*|buy_custom|sell_pct_.*)$"))
+    application.add_handler(CallbackQueryHandler(handle_refresh_token_panel_outside_conv, pattern="^token_panel_refresh$"))
 
     # --- Other callback menus ---
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))

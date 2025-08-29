@@ -10,3 +10,4 @@ pymongo
 cryptography
 asyncio
 websockets
+Pillow
