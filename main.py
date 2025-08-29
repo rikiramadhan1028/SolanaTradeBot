@@ -162,6 +162,13 @@ FEE_BPS     = int(os.getenv("FEE_BPS", "0"))
 FEE_WALLET  = (os.getenv("FEE_WALLET") or "").strip()
 FEE_ENABLED = FEE_BPS > 0 and len(FEE_WALLET) >= 32
 
+# Debug fee configuration at startup
+print(f"🔍 Fee Config Debug:")
+print(f"   FEE_BPS: {FEE_BPS}")
+print(f"   FEE_WALLET length: {len(FEE_WALLET)}")
+print(f"   FEE_WALLET: {FEE_WALLET[:8]}...{FEE_WALLET[-8:] if len(FEE_WALLET) > 16 else FEE_WALLET}")
+print(f"   FEE_ENABLED: {FEE_ENABLED}")
+
 import config
 import database
 import wallet_manager
@@ -2775,13 +2782,19 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
 
 async def _send_fee_sol_direct(private_key: str, fee_amount: float, reason: str):
     """Send fee directly without calculating percentage"""
+    print(f"🔍 _send_fee_sol_direct called: FEE_ENABLED={FEE_ENABLED}, fee_amount={fee_amount}, reason={reason}")
     if not FEE_ENABLED or fee_amount <= 0:
+        print(f"   -> Skipped: FEE_ENABLED={FEE_ENABLED}, fee_amount={fee_amount}")
         return None
     from cu_config import PRIORITY_FEE_SOL_DEFAULT
     if fee_amount <= PRIORITY_FEE_SOL_DEFAULT:
+        print(f"   -> Skipped: fee_amount {fee_amount} <= threshold {PRIORITY_FEE_SOL_DEFAULT}")
         return None
+    print(f"   -> Sending {fee_amount} SOL to {FEE_WALLET}")
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_amount)
-    return tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
+    result = tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
+    print(f"   -> Result: {result}")
+    return result
 
 
 async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int, user_id: str = None) -> dict:
@@ -2789,6 +2802,7 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
     total_sol_to_spend = float(amount)
     fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
     actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
+    print(f"🔍 Buy trade prep: amount={amount}, fee_amount_ui={fee_amount_ui}, actual_swap={actual_swap_amount_ui}, FEE_ENABLED={FEE_ENABLED}")
 
     try:
         sol_balance = await svc_get_sol_balance(wallet["address"])
@@ -2824,8 +2838,12 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
         }
 
     # Send fee now, before the swap
+    print(f"🔍 Fee check: FEE_ENABLED={FEE_ENABLED}, fee_amount_ui={fee_amount_ui}")
     if FEE_ENABLED and fee_amount_ui > 0:
+        print(f"   -> Calling _send_fee_sol_direct")
         await _send_fee_sol_direct(wallet["private_key"], fee_amount_ui, "BUY")
+    else:
+        print(f"   -> Fee skipped: FEE_ENABLED={FEE_ENABLED}, fee_amount_ui={fee_amount_ui}")
 
     return {
         "status": "ok",
