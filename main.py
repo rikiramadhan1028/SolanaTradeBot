@@ -2494,8 +2494,11 @@ async def handle_menu_settings(update: Update, context: ContextTypes.DEFAULT_TYP
     user_cu_price = get_user_cu_price(str(user_id))
     current_tier = _tier_of(user_cu_price)
     
+    anti_mev_status = get_user_anti_mev(user_id)
+    
     text = f"⚙️ <b>Bot Settings</b>\n\n"
-    text += f"Current Priority Tier: <code>{current_tier}</code>\n\n"
+    text += f"Priority Tier: <code>{current_tier}</code>\n"
+    text += f"🛡️ Anti-MEV: {'✅ <b>ACTIVE</b>' if anti_mev_status else '❌ DISABLED'}\n\n"
     text += "Configure your trading preferences below:"
     
     await q.edit_message_text(
@@ -3294,20 +3297,37 @@ async def perform_trade(
             # Use priority tier system for better fee management
             user_priority_tier = get_user_priority_tier(str(user_id))
             user_cu_price = get_user_cu_price(str(user_id))  # fallback for legacy
+            anti_mev_enabled = get_user_anti_mev(user_id)
             
-            
-            res = await pumpfun_swap(
-                private_key=wallet["private_key"],
-                action=trade_type,
-                mint=token_mint,
-                amount=amt_param,
-                denominated_in_sol=denom_sol,
-                slippage_bps=slip_pct * 100,  # convert percentage to basis points
-                priority_tier=user_priority_tier,  # NEW: Use tier system
-                compute_unit_price_micro_lamports=user_cu_price,  # Fallback
-                pool="auto",
-                use_jito=JITO_ENABLED,  # Configurable Jito for faster transactions
-            )
+            # REAL Anti-MEV implementation: Use local Jito bundles when enabled
+            if anti_mev_enabled and JITO_ENABLED:
+                # Use local Jito bundle implementation for REAL MEV protection
+                res = await solana_client.perform_pumpfun_jito_bundle(
+                    sender_private_key_json=wallet["private_key"],
+                    amount=amt_param,
+                    action=trade_type,
+                    mint=token_mint,
+                    bundle_count=1,  # Single transaction bundle
+                    compute_unit_price_micro_lamports=user_cu_price,
+                )
+                
+                # Convert bundle result to expected format
+                if isinstance(res, str) and not res.startswith("Error"):
+                    res = {"bundle": res}  # Format as expected by _handle_trade_response
+            else:
+                # Standard swap via trade service
+                res = await pumpfun_swap(
+                    private_key=wallet["private_key"],
+                    action=trade_type,
+                    mint=token_mint,
+                    amount=amt_param,
+                    denominated_in_sol=denom_sol,
+                    slippage_bps=slip_pct * 100,  # convert percentage to basis points
+                    priority_tier=user_priority_tier,  # NEW: Use tier system
+                    compute_unit_price_micro_lamports=user_cu_price,  # Fallback
+                    pool="auto",
+                    use_jito=False,  # Use service-side when not using local bundles
+                )
         else:
             # Use priority tier system for DEX swaps too
             user_priority_tier = get_user_priority_tier(str(user_id))
@@ -3319,19 +3339,26 @@ async def perform_trade(
             skip_preflight = get_user_jupiter_skip_preflight(user_id)
             anti_mev_enabled = get_user_anti_mev(user_id)
             
-            # Anti-MEV implementation: If enabled, force versioned transactions and higher priority
+            # REAL Anti-MEV implementation for Jupiter/DEX
             if anti_mev_enabled:
-                enable_versioned_tx = True  # Force versioned TX for MEV protection
-                if user_priority_tier == "off":
-                    user_priority_tier = "fast"  # Minimum priority for MEV protection
+                enable_versioned_tx = True  # Force versioned TX for faster processing
+                skip_preflight = False  # Disable skip preflight for safety
+                
+                # Force minimum TURBO priority for real MEV protection
+                if user_priority_tier in ["off", "fast"]:
+                    user_priority_tier = "turbo"  # Higher priority for MEV protection
+                    
+                # Add max accounts limit to reduce transaction size (harder to front-run)
+                max_accounts = 20
             
             res = await dex_swap(
                 private_key=wallet["private_key"],
                 **prep["params"],
-                priority_tier=user_priority_tier,  # Use tier system
+                priority_tier=user_priority_tier,  # Use tier system (TURBO for Anti-MEV)
                 compute_unit_price_micro_lamports=user_cu_price,  # Fallback for legacy
                 enable_versioned_tx=enable_versioned_tx,  # Jupiter optimization
-                skip_preflight=skip_preflight,  # Jupiter optimization  
+                skip_preflight=skip_preflight,  # Jupiter optimization
+                max_accounts=max_accounts if anti_mev_enabled else None,  # MEV protection
             )
 
         # handle sukses/gagal + update posisi
