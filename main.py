@@ -1164,6 +1164,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
     await track_bot_message(context, response.message_id)
 
+# === Missing Direct Handler Functions ===
+async def handle_assets_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct handler for assets deep link"""
+    await handle_assets(update, context)
+
+async def handle_wallet_menu_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct handler for wallet menu deep link"""
+    await handle_wallet_menu(update, context)
+
+async def handle_menu_settings_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct handler for settings menu deep link"""
+    await handle_menu_settings(update, context)
+
+async def handle_copy_menu_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct handler for copy trading menu deep link"""
+    await handle_copy_menu(update, context)
+
+async def buy_sell_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct handler for buy/sell deep link - redirect to main menu"""
+    # Since there's no direct equivalent, redirect to main menu
+    clear_user_context(context)
+    user_mention = update.effective_user.mention_html()
+    welcome_text = await get_dynamic_start_message_text(update.effective_user.id, user_mention)
+    response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(update.effective_user.id))
+    await track_bot_message(context, response.message_id)
+
+async def pumpfun_trade_entry_direct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct handler for pumpfun trade deep link"""
+    # Redirect to main menu since pumpfun entry is handled via conversation
+    clear_user_context(context)
+    user_mention = update.effective_user.mention_html()
+    welcome_text = await get_dynamic_start_message_text(update.effective_user.id, user_mention)
+    response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(update.effective_user.id))
+    await track_bot_message(context, response.message_id)
+
 async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -2689,7 +2724,7 @@ async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAU
     if not mint:
         return await handle_back_to_buy_sell_menu(update, context)
     panel = await build_token_panel(q.from_user.id, mint)
-    await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+    await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context, q.from_user.id), parse_mode="HTML")
     return AWAITING_TRADE_ACTION
 
 async def handle_back_to_token_panel_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2990,6 +3025,55 @@ async def handle_set_priority_tier(update: Update, context: ContextTypes.DEFAULT
     
     user_id = str(update.effective_user.id)
     choice = q.data.split(":", 1)[1]  # "set_cu:off" -> "off"
+    
+    # Import required constants
+    from cu_config import (
+        DEX_CU_PRICE_MICRO_FAST, DEX_CU_PRICE_MICRO_TURBO, DEX_CU_PRICE_MICRO_ULTRA,
+        PRIORITY_FEE_SOL_FAST, PRIORITY_FEE_SOL_TURBO, PRIORITY_FEE_SOL_ULTRA
+    )
+    
+    if choice == "custom":
+        context.user_data["awaiting_custom_cu"] = True
+        await q.edit_message_text(
+            "✏️ Send a number for <b>computeUnitPriceMicroLamports</b>\n"
+            "Example: <code>2000</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_settings")]]),
+        )
+        return SET_CU_PRICE
+    elif choice == "off":
+        user_cu_price = None
+        tier_name = "OFF"
+        note = "Priority fee set to OFF (no extra fee)."
+    elif choice == "fast":
+        user_cu_price = DEX_CU_PRICE_MICRO_FAST
+        tier_name = "FAST"
+        fee_sol = PRIORITY_FEE_SOL_FAST
+        note = f"FAST tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
+    elif choice == "turbo":
+        user_cu_price = DEX_CU_PRICE_MICRO_TURBO
+        tier_name = "TURBO"
+        fee_sol = PRIORITY_FEE_SOL_TURBO
+        note = f"TURBO tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
+    elif choice == "ultra":
+        user_cu_price = DEX_CU_PRICE_MICRO_ULTRA
+        tier_name = "ULTRA"
+        fee_sol = PRIORITY_FEE_SOL_ULTRA
+        note = f"ULTRA tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
+    else:
+        note = "Unknown option."
+        user_cu_price = None
+        tier_name = "UNKNOWN"
+
+    # Save to persistent storage  
+    UserSettings.set_user_cu_price(user_id, user_cu_price)
+    UserSettings.set_user_priority_tier(user_id, tier_name.lower() if tier_name != "OFF" else None)
+
+    await q.edit_message_text(
+        f"✅ {note}\nCurrent: <code>{_tier_of(user_cu_price)}</code>",
+        parse_mode="HTML",
+        reply_markup=_settings_keyboard(int(user_id)),
+    )
 
 # Slippage handlers
 async def handle_set_slippage_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3060,49 +3144,7 @@ async def handle_toggle_jupiter_preflight(update: Update, context: ContextTypes.
     
     # Refresh Jupiter settings
     await handle_settings_jupiter_opts(update, context)
-    
-    if choice == "custom":
-        context.user_data["awaiting_custom_cu"] = True
-        await q.edit_message_text(
-            "✏️ Send a number for <b>computeUnitPriceMicroLamports</b>\n"
-            "Example: <code>2000</code>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu_settings")]]),
-        )
-        return SET_CU_PRICE
-    elif choice == "off":
-        user_cu_price = None
-        tier_name = "OFF"
-        note = "Priority fee set to OFF (no extra fee)."
-    elif choice == "fast":
-        user_cu_price = DEX_CU_PRICE_MICRO_FAST
-        tier_name = "FAST"
-        fee_sol = PRIORITY_FEE_SOL_FAST
-        note = f"FAST tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
-    elif choice == "turbo":
-        user_cu_price = DEX_CU_PRICE_MICRO_TURBO
-        tier_name = "TURBO"
-        fee_sol = PRIORITY_FEE_SOL_TURBO
-        note = f"TURBO tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
-    elif choice == "ultra":
-        user_cu_price = DEX_CU_PRICE_MICRO_ULTRA
-        tier_name = "ULTRA"
-        fee_sol = PRIORITY_FEE_SOL_ULTRA
-        note = f"ULTRA tier: {fee_sol} SOL priority fee ({user_cu_price} μ-lamports/CU)."
-    else:
-        note = "Unknown option."
-        user_cu_price = None
-        tier_name = "UNKNOWN"
 
-    # Save to persistent storage
-    UserSettings.set_user_cu_price(user_id, user_cu_price)
-    UserSettings.set_user_priority_tier(user_id, tier_name.lower() if tier_name != "OFF" else None)
-
-    await q.edit_message_text(
-        f"✅ {note}\nCurrent: <code>{_tier_of(user_cu_price)}</code>",
-        parse_mode="HTML",
-        reply_markup=_settings_keyboard(),
-    )
 
 async def handle_custom_cu_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle custom CU price input."""
@@ -3283,7 +3325,7 @@ async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAU
         panel = await build_token_panel(q.from_user.id, mint, force_fresh=True)
         
         # Update message with fresh data
-        await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context), parse_mode="HTML")
+        await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context, q.from_user.id), parse_mode="HTML")
         # Track this edited message for cleanup
         await track_bot_message(context, q.message.message_id)
     except Exception as e:
@@ -3578,7 +3620,7 @@ async def _handle_trade_response(
         
         # Get fresh trading panel after successful trade
         try:
-            user_id = update.effective_user.id
+            # user_id already passed as parameter
             fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True)
             
             # Combine success message with fresh trading panel
@@ -3632,7 +3674,7 @@ async def _handle_trade_response(
             combined_message = f"{error_msg}\n\n━━━━━━━━━━━━━━━━━━━━\n{fresh_panel}"
             response = await message.reply_html(combined_message, reply_markup=token_panel_keyboard(context, user_id))
             # Track the response message for cleanup
-            add_user_response_to_track(context, response.message_id)
+            await track_bot_message(context, response.message_id)
         except Exception as e:
             print(f"Failed to show trading panel after error: {e}")
             # Fallback to just error message
@@ -3892,7 +3934,7 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         success_msg = f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.\n\n{panel}"
         response = await update.message.reply_html(
             success_msg,
-            reply_markup=token_panel_keyboard(context),
+            reply_markup=token_panel_keyboard(context, update.effective_user.id),
         )
         await track_bot_message(context, response.message_id)
         
