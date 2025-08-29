@@ -6,6 +6,7 @@ import re
 import asyncio
 import httpx
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Optional
 from enum import Enum
 from dotenv import load_dotenv
@@ -1074,8 +1075,52 @@ async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = Fals
 
 # ================== Bot Handlers ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_user_context(context)
     user_id = update.effective_user.id
+
+    # Deep-link payloads: trade_*, hide_*, sharepnl_*  (from assets text links)
+    args = context.args if hasattr(context, "args") else []
+    if args:
+        payload = args[0]
+        if payload.startswith("trade_"):
+            mint = payload.split("_", 1)[1]
+            context.user_data["trade_mint"] = mint
+            panel = await build_token_panel(user_id, mint)
+            resp = await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context, user_id))
+            await track_bot_message(context, resp.message_id)
+            return
+        if payload.startswith("hide_"):
+            mint = payload.split("_", 1)[1]
+            st = context.user_data.setdefault("assets_state", {"page": 1, "sort": "value", "hide_dust": False, "dust_usd": 0.0, "detail": True, "hidden_mints": set()})
+            hidden = set(st.get("hidden_mints", set()))
+            hidden.add(mint)
+            st["hidden_mints"] = hidden
+            await _render_assets_detailed_view(update.message, context)
+            return
+        if payload.startswith("sharepnl_"):
+            mint = payload.split("_", 1)[1]
+            # Reuse the same builder; emulate callback flow
+            data = await _build_pnl_card_data(user_id, mint)
+            if not data:
+                resp = await update.message.reply_text("❌ No wallet found")
+                await track_bot_message(context, resp.message_id)
+                return
+            img_bytes = _draw_pnl_card_image(
+                data["symbol"], data["mint"], data["pnl_pct"], data["total_invested"], data["current_value"], data["pnl_usd"],
+            )
+            caption = (
+                f"${data['symbol']}\nPnL: {data['pnl_pct']*100:+.1f}% | "
+                f"Invested: {format_usd(data['total_invested'])} | Value: {format_usd(data['current_value'])} | "
+                f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+            )
+            if img_bytes:
+                resp = await update.message.reply_photo(photo=BytesIO(img_bytes), caption=caption)
+            else:
+                resp = await update.message.reply_text(caption)
+            await track_bot_message(context, resp.message_id)
+            return
+
+    # Default start menu
+    clear_user_context(context)
     user_mention = update.effective_user.mention_html()
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
@@ -1101,7 +1146,14 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_TYPE):
     """Render SPL tokens sebagai kartu detail ala screenshot."""
-    user_id = q_or_msg.from_user.id if hasattr(q_or_msg, "from_user") else context._user_id
+    # Works for both CallbackQuery and Message
+    user_id = (
+        getattr(q_or_msg, "from_user", None).id
+        if hasattr(q_or_msg, "from_user") and q_or_msg.from_user
+        else getattr(getattr(q_or_msg, "message", None), "chat", None).id
+        if hasattr(q_or_msg, "message") and getattr(q_or_msg, "message", None)
+        else getattr(getattr(q_or_msg, "chat", None), "id", None)
+    )
     w = database.get_user_wallet(user_id)
     addr = (w or {}).get("address")
     if not addr:
@@ -1251,6 +1303,7 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     # token cards
     if not page_items:
         lines.append("(No tokens on this page)")
+    bot_username = getattr(context.bot, "username", os.getenv("TELEGRAM_BOT_USERNAME", "")) or ""
     for x in page_items:
         mint = x["mint"]; sym = x["symbol"]
         val_sol = x["value_sol"]; val_usd = x["value_usd"]; price = x["price_usd"]
@@ -1271,15 +1324,23 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         indicator = "📈" if (pnl_pct is not None and pnl_pct >= 0) else ("📉" if pnl_pct is not None else "📊")
         danger = "🟩" if (pnl_pct is not None and pnl_pct >= 0) else ("🟥" if pnl_pct is not None else "")
 
-        lines.append(f"<b><a href='tg://callback?data=trade_token_{mint}'>${sym}</a></b> {indicator} : <code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
-                     f"[<a href='tg://callback?data=assets_hide_{mint}'>hide</a>]")  # Make symbol clickable to trade
+        # Use bot deep links to trigger actions in ALL Telegram clients reliably
+        # /start payloads handled in `start()` below
+        trade_deeplink = f"https://t.me/{bot_username}?start=trade_{mint}" if bot_username else f"start=trade_{mint}"
+        hide_deeplink  = f"https://t.me/{bot_username}?start=hide_{mint}"  if bot_username else f"start=hide_{mint}"
+        lines.append(
+            f"<b><a href='{trade_deeplink}'>${sym}</a></b> {indicator} : "
+            f"<code>{val_sol:.3f} SOL</code> ({format_usd(val_usd)}) "
+            f"[<a href='{hide_deeplink}'>hide</a>]"
+        )
         lines.append(f"<code>{mint}</code>")
         if pnl_pct is not None:
             lines.append(f"• PNL: {format_pct(pnl_pct)} "
                          f"({(pnl_sol or 0):.3f} SOL/{format_usd((pnl_sol or 0)*sol_price)}) {danger}")
         else:
             lines.append("• PNL: —")
-        lines.append(f"[<a href='tg://callback?data=assets_share_pnl_{mint}'>Share PNL</a>]")
+        share_deeplink = f"https://t.me/{bot_username}?start=sharepnl_{mint}" if bot_username else f"start=sharepnl_{mint}"
+        lines.append(f"[<a href='{share_deeplink}'>Share PNL</a>]")
         avg_mc = pos.get("avg_entry_mc_usd")
         avg_px = pos.get("avg_entry_price_usd")
         lines.append(f"• Avg Entry: {format_usd(avg_px or 0)}  Avg Entry MC: {format_usd(avg_mc or 0)}")
@@ -1320,8 +1381,13 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
     kb_rows.append(back)
     keyboard = InlineKeyboardMarkup(kb_rows)
 
+    # Safe send/edit for both CallbackQuery and Message
     if hasattr(q_or_msg, "edit_message_text"):
-        await q_or_msg.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True)
+        await q_or_msg.edit_message_text(
+            text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True
+        )
+    elif hasattr(q_or_msg, "reply_html"):
+        await q_or_msg.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
     else:
         await q_or_msg.message.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
 
@@ -1395,114 +1461,143 @@ async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_
 
     await _render_assets_detailed_view(q, context)
 
-async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint: str):
-    """Share PnL with modern CEX-like image based on performance"""
-    user_id = q.from_user.id
-    w = database.get_user_wallet(user_id)
-    addr = (w or {}).get("address")
-    
-    if not addr:
-        response = await q.message.reply_text("❌ No wallet found")
-        await track_bot_message(context, response.message_id)
-        # Auto-cleanup error message after 5 minutes
-        chat_id = q.message.chat_id
-        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
-        return
-    
+
+# ---------- PNL card helpers (image) ----------
+
+def _draw_pnl_card_image(symbol: str, mint: str, pnl_pct: float, total_invested: float, current_value: float, pnl_usd: float) -> bytes:
+    """Generate a simple PnL card PNG using Pillow. Fallback handled by caller."""
     try:
-        # Get token data for this specific mint
-        meta = await MetaCache.get(mint)
-        pack = await DexCache.get(mint, prefer_cache=True)
-        pos = database.position_get(user_id, mint) or {}
-        
-        symbol = (meta.get("symbol") or "").strip() or mint[:6].upper()
-        price = float(pack.get("price") or 0.0)
-        
-        # Calculate PnL
-        pnl_pct = None
-        pnl_usd = 0
-        if pos and price > 0:
-            avg_px = pos.get("avg_entry_price_usd")
-            if isinstance(avg_px, (int, float)) and avg_px > 0:
-                # Get current balance
-                tokens = await svc_get_token_balances(addr, min_amount=0.0)
-                current_amount = 0
-                for t in tokens:
-                    if (t.get("mint") or t.get("mintAddress")) == mint:
-                        current_amount = float(t.get("amount") or t.get("uiAmount") or 0)
-                        break
-                
-                if current_amount > 0:
-                    cost_usd = current_amount * avg_px
-                    current_usd = current_amount * price
-                    pnl_usd = current_usd - cost_usd
-                    pnl_pct = (pnl_usd / cost_usd) if cost_usd > 0 else 0
-        
-        if pnl_pct is not None:
-            # Get current token balance for detailed PnL card
-            tokens = await svc_get_token_balances(addr, min_amount=0.0)
-            current_amount = 0
-            for t in tokens:
-                if (t.get("mint") or t.get("mintAddress")) == mint:
-                    current_amount = float(t.get("amount") or t.get("uiAmount") or 0)
-                    break
-            
-            # Calculate detailed PnL data
-            pnl_text = f"{pnl_pct*100:+.1f}%" if pnl_pct else "0.0%"
-            avg_entry_price = pos.get('avg_entry_price_usd', 0)
-            total_invested = current_amount * avg_entry_price if avg_entry_price > 0 else 0
-            current_value = current_amount * price
-            
-            # Create PnL card similar to the example
-            card = "🎯 <b>PnL CARD</b> 🎯\n"
-            card += "━━━━━━━━━━━━━━━━━━\n\n"
-            
-            # Token info header
-            card += f"<b>${symbol}</b>\n"
-            card += f"<code>{mint[:8]}...{mint[-8:]}</code>\n\n"
-            
-            # Main PnL display (large)
-            if pnl_pct >= 0:
-                emoji = "🟢" if pnl_pct < 0.25 else "🚀" if pnl_pct >= 0.5 else "📈"
-                card += f"{emoji} <b>{pnl_text}</b> {emoji}\n\n"
-            else:
-                emoji = "🟡" if pnl_pct >= -0.25 else "🔴" if pnl_pct >= -0.5 else "💀"
-                card += f"{emoji} <b>{pnl_text}</b> {emoji}\n\n"
-            
-            # Investment details
-            card += f"💎 <b>Total Invested</b>\n{format_usd(total_invested)}\n\n"
-            card += f"💰 <b>Current Value</b>\n{format_usd(current_value)}\n\n"
-            
-            pnl_label = "Profit" if pnl_usd >= 0 else "Loss"
-            card += f"{'📈' if pnl_usd >= 0 else '📉'} <b>{pnl_label}</b>\n{format_usd(abs(pnl_usd))}\n\n"
-            
-            # Additional info
-            card += f"📊 <b>Entry Price:</b> {format_usd(avg_entry_price)}\n"
-            card += f"💎 <b>Current Price:</b> {format_usd(price)}\n"
-            card += f"🪙 <b>Balance:</b> {current_amount:,.4f}\n\n"
-            
-            card += "━━━━━━━━━━━━━━━━━━\n"
-            card += "🤖 <i>RokuTrade - Solana Trading Bot</i>"
-            
-            # Send the PnL card
-            await q.message.reply_text(
-                card,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-        else:
-            response = await q.message.reply_text("❌ No PnL data available for this token")
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return b""  # signal fallback
+
+    W, H = 900, 1200
+    img = Image.new("RGB", (W, H), (17, 20, 24))
+    d = ImageDraw.Draw(img)
+
+    # Soft gradient bars
+    for i in range(H):
+        c = 34 + int(10 * (i / H))
+        d.line([(0, i), (W, i)], fill=(17, c, 28))
+
+    # Load fonts (fallback to default)
+    def _font(size, bold=False):
+        try:
+            fname = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else \
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            return ImageFont.truetype(fname, size)
+        except Exception:
+            return ImageFont.load_default()
+
+    # Header
+    d.text((40, 40), f"{symbol} / SOL", font=_font(54, True), fill=(255, 255, 255))
+    d.text((40, 110), f"{mint[:8]}…{mint[-8:]}", font=_font(28), fill=(180, 200, 210))
+
+    # Big PnL
+    pnl_str = f"{pnl_pct*100:+.1f}%"
+    col = (60, 220, 120) if pnl_pct >= 0 else (230, 70, 90)
+    d.rounded_rectangle([(40, 180), (W-40, 560)], radius=36, fill=(25, 30, 36))
+    d.text((W//2 - 200, 260), pnl_str, font=_font(160, True), fill=col)
+
+    # Stats section
+    d.rounded_rectangle([(40, 600), (W-40, 1100)], radius=36, fill=(25, 30, 36))
+    def _row(y, label, value):
+        d.text((80, y), label, font=_font(34), fill=(180, 200, 210))
+        d.text((80, y+52), value, font=_font(46, True), fill=(255, 255, 255))
+
+    _row(640, "Total Invested", f"{format_usd(total_invested)}")
+    _row(760, "Current Value", f"{format_usd(current_value)}")
+    lp_label = "Profit" if pnl_usd >= 0 else "Loss"
+    _row(880, lp_label, f"{format_usd(abs(pnl_usd))}")
+
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    return bio.getvalue()
+
+
+async def _build_pnl_card_data(user_id: int, mint: str) -> dict | None:
+    """Collect live data for PnL card."""
+    w = database.get_user_wallet(user_id) or {}
+    addr = w.get("address")
+    if not addr:
+        return None
+
+    meta = await MetaCache.get(mint)
+    packs = await DexCache.get_bulk([mint], prefer_cache=True)
+    pack = packs.get(mint, {})
+    price = float(pack.get("price") or 0.0)
+    pos = database.position_get(user_id, mint) or {}
+
+    symbol = (meta.get("symbol") or "").strip() or mint[:6].upper()
+
+    # Current amount
+    tokens = await svc_get_token_balances(addr, min_amount=0.0)
+    cur_amt = 0.0
+    for t in tokens:
+        if (t.get("mint") or t.get("mintAddress")) == mint:
+            cur_amt = float(t.get("amount") or t.get("uiAmount") or 0)
+            break
+
+    if cur_amt <= 0 or price <= 0:
+        return {
+            "symbol": symbol, "mint": mint, "pnl_pct": 0.0,
+            "total_invested": 0.0, "current_value": 0.0, "pnl_usd": 0.0,
+        }
+
+    avg_px = pos.get("avg_entry_price_usd") or 0.0
+    total_invested = cur_amt * avg_px if avg_px > 0 else 0.0
+    current_value  = cur_amt * price
+    pnl_usd = current_value - total_invested
+    pnl_pct = (pnl_usd / total_invested) if total_invested > 0 else 0.0
+
+    return {
+        "symbol": symbol,
+        "mint": mint,
+        "pnl_pct": pnl_pct,
+        "total_invested": total_invested,
+        "current_value": current_value,
+        "pnl_usd": pnl_usd,
+    }
+
+async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint: str):
+    """Share PnL as an IMAGE card; fallback to text."""
+    user_id = q.from_user.id
+    try:
+        data = await _build_pnl_card_data(user_id, mint)
+        if not data:
+            response = await q.message.reply_text("❌ No wallet found")
             await track_bot_message(context, response.message_id)
-            # Auto-cleanup error message after 5 minutes
-            chat_id = q.message.chat_id
-            asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
-            
+            asyncio.create_task(auto_cleanup_success_message(context, q.message.chat_id, response.message_id, 5))
+            return
+
+        img_bytes = _draw_pnl_card_image(
+            data["symbol"], data["mint"], data["pnl_pct"], data["total_invested"], data["current_value"], data["pnl_usd"],
+        )
+
+        caption = (
+            f"${data['symbol']}\n"
+            f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+            f"Invested: {format_usd(data['total_invested'])}  |  "
+            f"Value: {format_usd(data['current_value'])}  |  "
+            f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+        )
+
+        if img_bytes:
+            await q.message.reply_photo(photo=BytesIO(img_bytes), caption=caption)
+        else:
+            # Fallback text card
+            await q.message.reply_html(
+                f"<b>PnL CARD</b>\n\n<b>${data['symbol']}</b>\n<code>{data['mint'][:8]}…{data['mint'][-8:]}</code>\n\n"
+                f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                f"Total Invested: {format_usd(data['total_invested'])}\n"
+                f"Current Value: {format_usd(data['current_value'])}\n"
+                f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}",
+                disable_web_page_preview=True,
+            )
     except Exception as e:
-        response = await q.message.reply_text(f"❌ Error sharing PnL: {str(e)}")
+        response = await q.message.reply_text(f"❌ Error sharing PnL: {e}")
         await track_bot_message(context, response.message_id)
-        # Auto-cleanup error message after 5 minutes
-        chat_id = q.message.chat_id
-        asyncio.create_task(auto_cleanup_success_message(context, chat_id, response.message_id, 5))
+        asyncio.create_task(auto_cleanup_success_message(context, q.message.chat_id, response.message_id, 5))
 
 async def handle_trade(q, context: ContextTypes.DEFAULT_TYPE):
     """Handle trade button from assets view - navigate to token panel for specific token"""
@@ -1527,8 +1622,8 @@ async def handle_trade(q, context: ContextTypes.DEFAULT_TYPE):
         # Build and display token panel
         panel = await build_token_panel(user_id, mint)
         await q.edit_message_text(
-            panel, 
-            reply_markup=token_panel_keyboard(context), 
+            panel,
+            reply_markup=token_panel_keyboard(context, user_id),
             parse_mode="HTML"
         )
     except Exception as e:
