@@ -163,12 +163,6 @@ FEE_WALLET  = (os.getenv("FEE_WALLET") or "").strip()
 FEE_ENABLED = FEE_BPS > 0 and len(FEE_WALLET) >= 32
 FEE_MIN_SOL = float(os.getenv("FEE_MIN_SOL", "0.000000001")) if FEE_ENABLED else 0.0
 
-# Debug fee configuration at startup
-print(f"🔍 Fee Config Debug:")
-print(f"   FEE_BPS: {FEE_BPS}")
-print(f"   FEE_WALLET length: {len(FEE_WALLET)}")
-print(f"   FEE_WALLET: {FEE_WALLET[:8]}...{FEE_WALLET[-8:] if len(FEE_WALLET) > 16 else FEE_WALLET}")
-print(f"   FEE_ENABLED: {FEE_ENABLED}")
 
 import config
 import database
@@ -2624,8 +2618,8 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [
         [InlineKeyboardButton("🤖 Auto Trade - Pump.fun", callback_data="pumpfun_trade")],
         [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders")],
-        [InlineKeyboardButton("📈 Positions", callback_data="dummy_positions"), InlineKeyboardButton("👛 Wallet", callback_data="dummy_wallet")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="dummy_settings"), InlineKeyboardButton("💰 Referrals", callback_data="dummy_referrals")],
+        [InlineKeyboardButton("📈 Positions", callback_data="view_assets"), InlineKeyboardButton("👛 Wallet", callback_data="menu_wallet")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"), InlineKeyboardButton("💰 Referrals", callback_data="dummy_referrals")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
     ]
 
@@ -2647,8 +2641,39 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     return AWAITING_TOKEN_ADDRESS
 
+async def handle_limit_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle limit orders UI"""
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 Create Buy Limit Order", callback_data="create_buy_limit")],
+        [InlineKeyboardButton("📉 Create Sell Limit Order", callback_data="create_sell_limit")],
+        [InlineKeyboardButton("📋 View Active Orders", callback_data="view_limit_orders")],
+        [InlineKeyboardButton("❌ Cancel All Orders", callback_data="cancel_all_limits")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_to_buy_sell_menu")]
+    ])
+    
+    text = "🎯 <b>Limit Orders</b>\n\n"
+    text += "Set specific price targets for automatic buying or selling.\n\n"
+    text += "<i>Note: This feature is under development.</i>"
+    
+    await query.edit_message_text(
+        text=text,
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
 async def handle_dummy_trade_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    
+    if query.data == "dummy_limit_orders":
+        await handle_limit_orders(update, context)
+        return AWAITING_TOKEN_ADDRESS
+    elif query.data.startswith("create_") or query.data.startswith("view_limit") or query.data.startswith("cancel_"):
+        await query.answer(f"Limit order feature is under development.", show_alert=True)
+        return AWAITING_TOKEN_ADDRESS
+    
     await query.answer(f"Feature '{query.data}' is under development.", show_alert=True)
     return AWAITING_TOKEN_ADDRESS
 
