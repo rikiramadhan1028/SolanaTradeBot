@@ -751,6 +751,23 @@ async def auto_cleanup_success_message(context: ContextTypes.DEFAULT_TYPE, chat_
     except Exception:
         pass  # Message might already be deleted
 
+async def auto_cleanup_user_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, delay_minutes: int = 5):
+    """Schedule automatic cleanup of user messages after delay for clean chat"""
+    await asyncio.sleep(delay_minutes * 60)  # Convert minutes to seconds
+    try:
+        bot = context.bot
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass  # Message might already be deleted
+
+async def track_and_schedule_user_message_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Track user message and schedule it for auto-deletion after 5 minutes"""
+    if update.message and update.message.from_user.id != context.bot.id:
+        # This is a user message, schedule it for cleanup
+        chat_id = update.effective_chat.id
+        message_id = update.message.message_id
+        asyncio.create_task(auto_cleanup_user_message(context, chat_id, message_id, 5))
+
 async def ensure_message_cleanup_on_user_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Cleanup all bot messages when user performs any action"""
     await delete_all_bot_messages(context, chat_id)
@@ -1928,6 +1945,9 @@ async def handle_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = update.effective_chat.id
     await ensure_message_cleanup_on_user_action(context, chat_id)
     
+    # Schedule user message for auto-cleanup in 5 minutes
+    await track_and_schedule_user_message_cleanup(update, context)
+    
     amount_str = update.message.text.strip()
     current_balance = context.user_data.get("current_balance", 0)
     
@@ -2137,6 +2157,9 @@ async def handle_text_commands(update: Update, context: ContextTypes.DEFAULT_TYP
     # Clean up bot messages on any user text input
     chat_id = update.effective_chat.id
     await ensure_message_cleanup_on_user_action(context, chat_id)
+    
+    # Schedule user message for auto-cleanup in 5 minutes
+    await track_and_schedule_user_message_cleanup(update, context)
     
     user_id = update.effective_user.id
     text = update.message.text.strip().replace("\n", " ")
@@ -2642,6 +2665,9 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
     chat_id = update.effective_chat.id
     await ensure_message_cleanup_on_user_action(context, chat_id)
     
+    # Schedule user message for auto-cleanup in 5 minutes
+    await track_and_schedule_user_message_cleanup(update, context)
+    
     message = update.message if update.message else update.callback_query.message
     token_address = message.text.strip()
 
@@ -2722,6 +2748,9 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Clean up bot messages on user text input
     chat_id = update.effective_chat.id
     await ensure_message_cleanup_on_user_action(context, chat_id)
+    
+    # Schedule user message for auto-cleanup in 5 minutes
+    await track_and_schedule_user_message_cleanup(update, context)
     
     try:
         amount = float(update.message.text.strip())
@@ -3155,6 +3184,9 @@ async def handle_set_slippage_entry(update: Update, context: ContextTypes.DEFAUL
     return SET_SLIPPAGE
 
 async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Schedule user message for auto-cleanup in 5 minutes
+    await track_and_schedule_user_message_cleanup(update, context)
+    
     txt = (update.message.text or "").strip().replace("%", "")
     try:
         pct = float(txt)
@@ -3316,6 +3348,9 @@ async def pumpfun_handle_text_buy_amount(update: Update, context: ContextTypes.D
     # Clean up bot messages on user text input
     chat_id = update.effective_chat.id
     await ensure_message_cleanup_on_user_action(context, chat_id)
+    
+    # Schedule user message for auto-cleanup in 5 minutes
+    await track_and_schedule_user_message_cleanup(update, context)
     
     try:
         amount = float(update.message.text.strip())
