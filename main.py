@@ -161,6 +161,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://yourdomain.com/webhook")
 FEE_BPS     = int(os.getenv("FEE_BPS", "0"))
 FEE_WALLET  = (os.getenv("FEE_WALLET") or "").strip()
 FEE_ENABLED = FEE_BPS > 0 and len(FEE_WALLET) >= 32
+FEE_MIN_SOL = float(os.getenv("FEE_MIN_SOL", "0.000000001")) if FEE_ENABLED else 0.0
 
 # Debug fee configuration at startup
 print(f"🔍 Fee Config Debug:")
@@ -2773,43 +2774,39 @@ async def _send_fee_sol_if_any(private_key: str, ui_amount: float, reason: str):
     if not FEE_ENABLED:
         return None
     fee_ui = _fee_ui(ui_amount)
-    # Use minimum threshold based on system default priority fee
-    from cu_config import PRIORITY_FEE_SOL_DEFAULT
-    if fee_ui <= PRIORITY_FEE_SOL_DEFAULT:
+    if fee_ui <= 0:
         return None
+    if fee_ui < FEE_MIN_SOL:
+        fee_ui = FEE_MIN_SOL
     tx = solana_client.send_sol(private_key, FEE_WALLET, fee_ui)
     return tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
 
 async def _send_fee_sol_direct(private_key: str, fee_amount: float, reason: str):
-    """Send fee directly without calculating percentage"""
-    print(f"🔍 _send_fee_sol_direct called: FEE_ENABLED={FEE_ENABLED}, fee_amount={fee_amount}, reason={reason}")
-    if not FEE_ENABLED or fee_amount <= 0:
-        print(f"   -> Skipped: FEE_ENABLED={FEE_ENABLED}, fee_amount={fee_amount}")
+    # Kenapa: direct fee untuk BUY—hilangkan threshold agar selalu terkirim jika > 0
+    if not FEE_ENABLED:
         return None
-    from cu_config import PRIORITY_FEE_SOL_DEFAULT
-    if fee_amount <= PRIORITY_FEE_SOL_DEFAULT:
-        print(f"   -> Skipped: fee_amount {fee_amount} <= threshold {PRIORITY_FEE_SOL_DEFAULT}")
+    amt = float(fee_amount)
+    if amt <= 0:
         return None
-    print(f"   -> Sending {fee_amount} SOL to {FEE_WALLET}")
-    tx = solana_client.send_sol(private_key, FEE_WALLET, fee_amount)
-    result = tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
-    print(f"   -> Result: {result}")
-    return result
+    if amt < FEE_MIN_SOL:
+        amt = FEE_MIN_SOL
+    tx = solana_client.send_sol(private_key, FEE_WALLET, amt)
+    return tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
 
 
 async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int, user_id: str = None) -> dict:
-    """Prepares parameters for a buy trade, checking balance and handling pre-swap fees."""
     total_sol_to_spend = float(amount)
     fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
     actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
-    print(f"🔍 Buy trade prep: amount={amount}, fee_amount_ui={fee_amount_ui}, actual_swap={actual_swap_amount_ui}, FEE_ENABLED={FEE_ENABLED}")
+    if actual_swap_amount_ui <= 0:
+        return {"status": "error", "message": "❌ Amount is too small after fee."}
 
     try:
         sol_balance = await svc_get_sol_balance(wallet["address"])
     except Exception:
         sol_balance = 0.0
 
-    # Calculate actual priority fee buffer based on user settings
+    # buffer priority fee + base tx fee
     if user_id:
         user_priority_tier = get_user_priority_tier(user_id)
         if user_priority_tier:
@@ -2826,24 +2823,20 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
     else:
         from cu_config import PRIORITY_FEE_SOL_DEFAULT
         buffer_ui = PRIORITY_FEE_SOL_DEFAULT
-    
-    # Add small base transaction fee on top of priority fee
-    buffer_ui += 0.001  # Base tx fee (5000 lamports) + ATA rent
-    
-    
-    if sol_balance < total_sol_to_spend + buffer_ui:
+
+    buffer_ui += 0.001  # biaya dasar
+
+    # ✅ Perbaikan: cek saldo harus mencakup (swap + fee + buffer)
+    need_ui = actual_swap_amount_ui + fee_amount_ui + buffer_ui
+    if sol_balance < need_ui:
         return {
             "status": "error",
-            "message": f"❌ Not enough SOL. Need ~{(total_sol_to_spend + buffer_ui):.4f} SOL (amount + fees), you have {sol_balance:.4f} SOL.",
+            "message": f"❌ Not enough SOL. Need ~{need_ui:.4f} SOL (amount + platform fee + fees), you have {sol_balance:.4f} SOL.",
         }
 
-    # Send fee now, before the swap
-    print(f"🔍 Fee check: FEE_ENABLED={FEE_ENABLED}, fee_amount_ui={fee_amount_ui}")
+    # Kirim fee dulu (jika ada)
     if FEE_ENABLED and fee_amount_ui > 0:
-        print(f"   -> Calling _send_fee_sol_direct")
         await _send_fee_sol_direct(wallet["private_key"], fee_amount_ui, "BUY")
-    else:
-        print(f"   -> Fee skipped: FEE_ENABLED={FEE_ENABLED}, fee_amount_ui={fee_amount_ui}")
 
     return {
         "status": "ok",
