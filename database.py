@@ -418,3 +418,200 @@ def user_settings_list_all() -> list:
 def user_settings_count() -> int:
     """Get count of users with settings."""
     return user_settings_collection.count_documents({})
+
+# ===== Referral System =====
+import string, secrets
+
+# collection: referral_codes
+# doc shape:
+# {
+#   user_id: int,
+#   referral_code: str,           # unique 8-character code
+#   referred_by_user_id: int|None, # who referred this user
+#   referred_by_code: str|None,    # original referral code used
+#   total_earned_sol: float,       # total rewards earned
+#   referral_count: int,           # how many people they referred
+#   created_at: int,
+#   updated_at: int,
+# }
+referral_codes_collection = db["referral_codes"]
+referral_codes_collection.create_index([("user_id", ASCENDING)], unique=True)
+referral_codes_collection.create_index([("referral_code", ASCENDING)], unique=True)
+
+# collection: referral_earnings
+# doc shape:
+# {
+#   user_id: int,                  # who earned this reward
+#   earned_from_user_id: int,      # who generated the trading fee
+#   trade_mint: str,               # token that was traded
+#   trade_amount_sol: float,       # SOL amount of the trade
+#   platform_fee_sol: float,      # platform fee taken
+#   reward_level: int,             # 1, 2, or 3 (direct, indirect, extended)
+#   reward_percentage: float,      # 25%, 3%, or 2%
+#   reward_amount_sol: float,      # actual reward amount
+#   paid_out: bool,                # whether this has been paid
+#   trade_signature: str,          # blockchain tx signature
+#   created_at: int,
+# }
+referral_earnings_collection = db["referral_earnings"]
+referral_earnings_collection.create_index([("user_id", ASCENDING), ("created_at", -1)])
+referral_earnings_collection.create_index([("earned_from_user_id", ASCENDING)])
+referral_earnings_collection.create_index([("paid_out", ASCENDING)])
+
+def generate_unique_referral_code() -> str:
+    """Generate a unique 8-character referral code."""
+    chars = string.ascii_uppercase + string.digits
+    for _ in range(100):  # try up to 100 times to avoid infinite loop
+        code = ''.join(secrets.choice(chars) for _ in range(8))
+        if not referral_codes_collection.find_one({"referral_code": code}):
+            return code
+    raise RuntimeError("Failed to generate unique referral code")
+
+def create_referral_code(user_id: int, referred_by_code: str = None) -> dict:
+    """Create a new referral code for a user, optionally with referrer."""
+    user_id = int(user_id)
+    now = int(time.time())
+    
+    # Check if user already has a referral code
+    existing = referral_codes_collection.find_one({"user_id": user_id})
+    if existing:
+        return existing
+    
+    # Generate unique code
+    referral_code = generate_unique_referral_code()
+    
+    # Find referrer info if referred_by_code provided
+    referred_by_user_id = None
+    if referred_by_code:
+        referrer = referral_codes_collection.find_one({"referral_code": referred_by_code.upper()})
+        if referrer:
+            referred_by_user_id = referrer["user_id"]
+            # Update referrer's count
+            referral_codes_collection.update_one(
+                {"user_id": referred_by_user_id},
+                {"$inc": {"referral_count": 1}, "$set": {"updated_at": now}}
+            )
+    
+    # Create new referral record
+    doc = {
+        "user_id": user_id,
+        "referral_code": referral_code,
+        "referred_by_user_id": referred_by_user_id,
+        "referred_by_code": referred_by_code.upper() if referred_by_code else None,
+        "total_earned_sol": 0.0,
+        "referral_count": 0,
+        "created_at": now,
+        "updated_at": now,
+    }
+    
+    referral_codes_collection.insert_one(doc)
+    return doc
+
+def get_referral_info(user_id: int) -> dict:
+    """Get referral info for a user."""
+    doc = referral_codes_collection.find_one({"user_id": int(user_id)})
+    return doc if doc else {}
+
+def get_referral_by_code(referral_code: str) -> dict:
+    """Get referral info by referral code."""
+    doc = referral_codes_collection.find_one({"referral_code": referral_code.upper()})
+    return doc if doc else {}
+
+def add_referral_earning(
+    user_id: int,
+    earned_from_user_id: int,
+    trade_mint: str,
+    trade_amount_sol: float,
+    platform_fee_sol: float,
+    reward_level: int,
+    reward_percentage: float,
+    reward_amount_sol: float,
+    trade_signature: str
+) -> None:
+    """Record a referral earning."""
+    doc = {
+        "user_id": int(user_id),
+        "earned_from_user_id": int(earned_from_user_id),
+        "trade_mint": trade_mint,
+        "trade_amount_sol": float(trade_amount_sol),
+        "platform_fee_sol": float(platform_fee_sol),
+        "reward_level": int(reward_level),
+        "reward_percentage": float(reward_percentage),
+        "reward_amount_sol": float(reward_amount_sol),
+        "paid_out": False,
+        "trade_signature": trade_signature,
+        "created_at": int(time.time()),
+    }
+    
+    referral_earnings_collection.insert_one(doc)
+    
+    # Update total earned for the referrer
+    referral_codes_collection.update_one(
+        {"user_id": int(user_id)},
+        {
+            "$inc": {"total_earned_sol": float(reward_amount_sol)},
+            "$set": {"updated_at": int(time.time())}
+        }
+    )
+
+def get_referral_earnings(user_id: int, limit: int = 50) -> list:
+    """Get recent referral earnings for a user."""
+    return list(referral_earnings_collection.find(
+        {"user_id": int(user_id)},
+        sort=[("created_at", -1)],
+        limit=limit
+    ))
+
+def get_unpaid_referral_earnings(user_id: int) -> list:
+    """Get unpaid referral earnings for a user."""
+    return list(referral_earnings_collection.find({
+        "user_id": int(user_id),
+        "paid_out": False
+    }))
+
+def mark_referral_earnings_paid(user_id: int, earning_ids: list) -> None:
+    """Mark specific referral earnings as paid."""
+    from bson import ObjectId
+    referral_earnings_collection.update_many(
+        {
+            "user_id": int(user_id),
+            "_id": {"$in": [ObjectId(eid) for eid in earning_ids]}
+        },
+        {"$set": {"paid_out": True}}
+    )
+
+def get_referral_stats(user_id: int) -> dict:
+    """Get comprehensive referral stats for a user."""
+    referral_info = get_referral_info(user_id)
+    if not referral_info:
+        return {}
+    
+    # Get earnings by level
+    level_earnings = list(referral_earnings_collection.aggregate([
+        {"$match": {"user_id": int(user_id)}},
+        {"$group": {
+            "_id": "$reward_level",
+            "total_amount": {"$sum": "$reward_amount_sol"},
+            "count": {"$sum": 1}
+        }}
+    ]))
+    
+    # Get unpaid amount
+    unpaid = list(referral_earnings_collection.aggregate([
+        {"$match": {"user_id": int(user_id), "paid_out": False}},
+        {"$group": {
+            "_id": None,
+            "unpaid_amount": {"$sum": "$reward_amount_sol"},
+            "unpaid_count": {"$sum": 1}
+        }}
+    ]))
+    
+    return {
+        "referral_code": referral_info["referral_code"],
+        "total_earned": referral_info["total_earned_sol"],
+        "referral_count": referral_info["referral_count"],
+        "level_earnings": level_earnings,
+        "unpaid_amount": unpaid[0]["unpaid_amount"] if unpaid else 0.0,
+        "unpaid_count": unpaid[0]["unpaid_count"] if unpaid else 0,
+        "referred_by": referral_info.get("referred_by_code"),
+    }

@@ -177,7 +177,8 @@ import database
 from database import (
     get_user_slippage_buy, get_user_slippage_sell, get_user_language, 
     get_user_anti_mev, get_user_jupiter_versioned_tx, get_user_jupiter_skip_preflight,
-    user_settings_upsert
+    user_settings_upsert, create_referral_code, get_referral_info, get_referral_by_code,
+    add_referral_earning, get_referral_stats, get_referral_earnings
 )
 import wallet_manager
 from blockchain_clients.solana_client import SolanaClient
@@ -1177,6 +1178,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif payload == "pumpfun":
             await pumpfun_trade_entry_direct(update, context)
             return
+        
+        # Referral Code Deep Links
+        elif payload.startswith("ref_"):
+            referral_code = payload.split("_", 1)[1]
+            await handle_referral_signup(update, context, referral_code)
+            return
+
+    # Check if user needs referral code creation (first time user)
+    referral_info = get_referral_info(user_id)
+    if not referral_info:
+        # Create referral code for new user
+        create_referral_code(user_id)
 
     # Default start menu
     clear_user_context(context)
@@ -2892,6 +2905,283 @@ async def handle_refresh_token_panel_outside_conv(update: Update, context: Conte
         print(f"Error refreshing token panel: {e}")
         await query.edit_message_text("❌ Error refreshing token panel.")
 
+# ================== Referral System Handlers ==================
+
+async def handle_referral_signup(update: Update, context: ContextTypes.DEFAULT_TYPE, referral_code: str):
+    """Handle new user signup via referral link."""
+    user_id = update.effective_user.id
+    user_mention = update.effective_user.mention_html()
+    
+    # Check if referral code exists
+    referrer = get_referral_by_code(referral_code)
+    if not referrer:
+        await update.message.reply_html(
+            f"❌ Invalid referral code. Starting with regular signup..."
+        )
+        clear_user_context(context)
+        welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
+        response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
+        await track_bot_message(context, response.message_id)
+        return
+    
+    # Check if user already exists
+    existing = get_referral_info(user_id)
+    if existing:
+        if existing.get("referred_by_code"):
+            await update.message.reply_html(
+                f"👋 Welcome back! You're already registered with referral code <code>{existing['referral_code']}</code>"
+            )
+        else:
+            # User exists but wasn't referred - show regular menu
+            clear_user_context(context)
+            welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
+            response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
+            await track_bot_message(context, response.message_id)
+        return
+    
+    # Create new referral code for this user with referrer
+    new_code = create_referral_code(user_id, referral_code)
+    
+    # Success message with benefits
+    success_text = f"""
+🎉 <b>Welcome to RokuTrade!</b> {user_mention}
+
+✅ You've successfully joined via referral code: <code>{referral_code}</code>
+
+🎁 <b>Your Benefits:</b>
+• 10% fee discount on all trades (0.9% instead of 1%)
+• Your personal referral code: <code>{new_code['referral_code']}</code>
+
+💰 <b>Earn from Referrals:</b>
+• Level 1: 25% commission from direct referrals
+• Level 2: 3% commission from indirect referrals  
+• Level 3: 2% commission from extended referrals
+
+Let's get you started with trading! 🚀
+"""
+    
+    # Show welcome with referral benefits
+    response = await update.message.reply_html(success_text, reply_markup=get_start_menu_keyboard(user_id))
+    await track_bot_message(context, response.message_id)
+
+async def handle_referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle referral dashboard display."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Ensure user has referral code
+    referral_info = get_referral_info(user_id)
+    if not referral_info:
+        referral_info = create_referral_code(user_id)
+    
+    # Get comprehensive stats
+    stats = get_referral_stats(user_id)
+    
+    # Get bot username for referral link
+    bot_username = getattr(context.bot, "username", "") or os.getenv("TELEGRAM_BOT_USERNAME", "")
+    if bot_username:
+        referral_link = f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
+    else:
+        referral_link = f"Use code: {referral_info['referral_code']}"
+    
+    # Build level earnings display
+    level_display = []
+    level_names = {1: "Direct (25%)", 2: "Indirect (3%)", 3: "Extended (2%)"}
+    
+    if stats.get("level_earnings"):
+        for level_data in stats["level_earnings"]:
+            level = level_data["_id"]
+            amount = level_data["total_amount"]
+            count = level_data["count"]
+            level_display.append(f"  • {level_names.get(level, f'Level {level}')}: {amount:.4f} SOL ({count} trades)")
+    
+    # Create dashboard text
+    dashboard_text = f"""
+💰 <b>REFERRAL DASHBOARD</b>
+
+🏷️ <b>Your Referral Code:</b> <code>{referral_info['referral_code']}</code>
+
+🔗 <b>Your Referral Link:</b>
+<code>{referral_link}</code>
+
+📊 <b>Statistics:</b>
+• Total Referrals: {stats.get('referral_count', 0)} users
+• Total Earned: {stats.get('total_earned', 0):.4f} SOL
+• Unpaid Earnings: {stats.get('unpaid_amount', 0):.4f} SOL
+
+💎 <b>Earnings by Level:</b>
+{chr(10).join(level_display) if level_display else "  • No earnings yet"}
+
+🎁 <b>Your Benefits:</b>
+• 10% fee discount on all trades
+• Multi-level commission structure
+• Weekly payouts (min 0.1 SOL)
+
+📈 <b>Commission Rates:</b>
+• Level 1 (Direct): 25% of trading fees
+• Level 2 (Indirect): 3% of trading fees  
+• Level 3 (Extended): 2% of trading fees
+"""
+
+    # Create referral menu buttons
+    keyboard = [
+        [InlineKeyboardButton("📋 Copy Referral Link", callback_data="copy_referral_link")],
+        [InlineKeyboardButton("💰 View Recent Earnings", callback_data="view_referral_earnings")],
+        [InlineKeyboardButton("📊 Detailed Stats", callback_data="detailed_referral_stats")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
+    ]
+    
+    await query.edit_message_text(
+        dashboard_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+async def handle_copy_referral_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle copying referral link."""
+    query = update.callback_query
+    await query.answer("📋 Referral link copied to your clipboard!", show_alert=True)
+    
+    # Get user referral info
+    user_id = query.from_user.id
+    referral_info = get_referral_info(user_id)
+    
+    if referral_info:
+        bot_username = getattr(context.bot, "username", "") or os.getenv("TELEGRAM_BOT_USERNAME", "")
+        if bot_username:
+            referral_link = f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
+            
+            # Send referral link as a separate message for easy copying
+            msg = await query.message.reply_text(
+                f"🔗 Your referral link:\n<code>{referral_link}</code>\n\n"
+                f"📋 Tap to copy and share with friends!",
+                parse_mode="HTML"
+            )
+            await track_bot_message(context, msg.message_id)
+
+async def handle_view_referral_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle viewing recent referral earnings."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get recent earnings
+    earnings = get_referral_earnings(user_id, limit=10)
+    
+    if not earnings:
+        earnings_text = "📈 <b>Recent Referral Earnings</b>\n\n💭 No earnings yet. Share your referral link to start earning!"
+    else:
+        earnings_list = []
+        for earning in earnings:
+            from datetime import datetime
+            date = datetime.fromtimestamp(earning["created_at"]).strftime("%m/%d %H:%M")
+            level_name = {1: "Direct", 2: "Indirect", 3: "Extended"}.get(earning["reward_level"], f"L{earning['reward_level']}")
+            status = "✅ Paid" if earning["paid_out"] else "⏳ Pending"
+            
+            earnings_list.append(
+                f"• {date} | {level_name} ({earning['reward_percentage']:.0f}%) | {earning['reward_amount_sol']:.4f} SOL | {status}"
+            )
+        
+        earnings_text = f"""
+📈 <b>Recent Referral Earnings</b>
+
+{chr(10).join(earnings_list[:10])}
+
+💡 <i>Showing last 10 earnings</i>
+"""
+
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Back to Referral Menu", callback_data="referral_menu")],
+    ]
+    
+    await query.edit_message_text(
+        earnings_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+async def handle_detailed_referral_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle viewing detailed referral statistics."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get comprehensive stats
+    stats = get_referral_stats(user_id)
+    referral_info = get_referral_info(user_id)
+    
+    if not stats:
+        stats_text = "📊 <b>Detailed Statistics</b>\n\n💭 No referral data available."
+    else:
+        # Calculate total by level
+        level_breakdown = []
+        total_trades = 0
+        
+        if stats.get("level_earnings"):
+            for level_data in stats["level_earnings"]:
+                level = level_data["_id"]
+                amount = level_data["total_amount"]
+                count = level_data["count"]
+                total_trades += count
+                
+                if level == 1:
+                    level_name = "Direct Referrals (25%)"
+                elif level == 2:
+                    level_name = "Indirect Referrals (3%)"
+                elif level == 3:
+                    level_name = "Extended Referrals (2%)"
+                else:
+                    level_name = f"Level {level}"
+                
+                level_breakdown.append(
+                    f"<b>{level_name}</b>\n"
+                    f"  • Earnings: {amount:.6f} SOL\n"
+                    f"  • From {count} trades\n"
+                    f"  • Avg per trade: {(amount/count):.6f} SOL"
+                )
+        
+        # Get registration date
+        created_date = "Unknown"
+        if referral_info and referral_info.get("created_at"):
+            from datetime import datetime
+            created_date = datetime.fromtimestamp(referral_info["created_at"]).strftime("%Y-%m-%d")
+        
+        stats_text = f"""
+📊 <b>DETAILED REFERRAL STATISTICS</b>
+
+🏷️ <b>Account Info:</b>
+• Referral Code: <code>{referral_info.get('referral_code', 'N/A')}</code>
+• Registered: {created_date}
+• Referred By: {referral_info.get('referred_by_code', 'None')}
+
+📈 <b>Performance:</b>
+• Total Referrals: {stats.get('referral_count', 0)} users
+• Total Trades from Referrals: {total_trades}
+• Total Earnings: {stats.get('total_earned', 0):.6f} SOL
+• Pending Payout: {stats.get('unpaid_amount', 0):.6f} SOL
+
+💎 <b>Earnings Breakdown:</b>
+{chr(10).join(level_breakdown) if level_breakdown else "  • No earnings yet"}
+
+🎯 <b>Performance Tips:</b>
+• Share your link on social media
+• Invite active traders for higher commissions
+• Level 1 referrals earn you the most (25%)
+"""
+
+    keyboard = [
+        [InlineKeyboardButton("💰 View Recent Earnings", callback_data="view_referral_earnings")],
+        [InlineKeyboardButton("⬅️ Back to Referral Menu", callback_data="referral_menu")],
+    ]
+    
+    await query.edit_message_text(
+        stats_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
 async def dummy_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3286,7 +3576,7 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("🤖 Auto Trade - Pump.fun", callback_data="pumpfun_trade")],
         [InlineKeyboardButton("📉 Limit Orders", callback_data="dummy_limit_orders")],
         [InlineKeyboardButton("📈 Positions", callback_data="view_assets"), InlineKeyboardButton("👛 Wallet", callback_data="menu_wallet")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"), InlineKeyboardButton("💰 Referrals", callback_data="dummy_referrals")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"), InlineKeyboardButton("💰 Referrals", callback_data="referral_menu")],
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_main_menu")],
     ]
 
@@ -3498,10 +3788,100 @@ async def _send_fee_sol_direct(private_key: str, fee_amount: float, reason: str)
     tx = solana_client.send_sol(private_key, FEE_WALLET, amt)
     return tx if isinstance(tx, str) and not tx.lower().startswith("error") else None
 
+async def _calculate_referral_discount(user_id: int) -> float:
+    """Calculate fee discount for referred users (10% discount = 0.9 multiplier)."""
+    referral_info = get_referral_info(user_id)
+    if referral_info and referral_info.get("referred_by_code"):
+        return 0.9  # 10% discount
+    return 1.0  # No discount
+
+def _fee_ui_with_discount(val_ui: float, user_id: int) -> float:
+    """Calculate fee with referral discount applied."""
+    if not FEE_ENABLED:
+        return 0.0
+    base_fee = max(0.0, float(val_ui) * (FEE_BPS / 10_000.0))
+    discount_multiplier = asyncio.run(_calculate_referral_discount(user_id))
+    return base_fee * discount_multiplier
+
+async def _distribute_referral_rewards(
+    user_id: int, 
+    trade_mint: str, 
+    trade_amount_sol: float, 
+    platform_fee_sol: float, 
+    trade_signature: str
+):
+    """Distribute referral rewards based on platform fee collected."""
+    if not FEE_ENABLED or platform_fee_sol <= 0:
+        return
+    
+    referral_info = get_referral_info(user_id)
+    if not referral_info or not referral_info.get("referred_by_user_id"):
+        return
+    
+    # Get referral chain (up to 3 levels)
+    current_referrer_id = referral_info.get("referred_by_user_id")
+    rewards_to_distribute = []
+    
+    # Level 1: Direct referrer (25%)
+    if current_referrer_id:
+        level_1_reward = platform_fee_sol * 0.25
+        rewards_to_distribute.append({
+            "user_id": current_referrer_id,
+            "level": 1,
+            "percentage": 25.0,
+            "amount": level_1_reward
+        })
+        
+        # Level 2: Indirect referrer (3%)
+        level_1_info = get_referral_info(current_referrer_id)
+        if level_1_info and level_1_info.get("referred_by_user_id"):
+            level_2_referrer_id = level_1_info.get("referred_by_user_id")
+            level_2_reward = platform_fee_sol * 0.03
+            rewards_to_distribute.append({
+                "user_id": level_2_referrer_id,
+                "level": 2,
+                "percentage": 3.0,
+                "amount": level_2_reward
+            })
+            
+            # Level 3: Extended referrer (2%)
+            level_2_info = get_referral_info(level_2_referrer_id)
+            if level_2_info and level_2_info.get("referred_by_user_id"):
+                level_3_referrer_id = level_2_info.get("referred_by_user_id")
+                level_3_reward = platform_fee_sol * 0.02
+                rewards_to_distribute.append({
+                    "user_id": level_3_referrer_id,
+                    "level": 3,
+                    "percentage": 2.0,
+                    "amount": level_3_reward
+                })
+    
+    # Record all referral earnings
+    for reward in rewards_to_distribute:
+        if reward["amount"] > 0.000001:  # Only record meaningful amounts
+            add_referral_earning(
+                user_id=reward["user_id"],
+                earned_from_user_id=user_id,
+                trade_mint=trade_mint,
+                trade_amount_sol=trade_amount_sol,
+                platform_fee_sol=platform_fee_sol,
+                reward_level=reward["level"],
+                reward_percentage=reward["percentage"],
+                reward_amount_sol=reward["amount"],
+                trade_signature=trade_signature
+            )
+
 
 async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slippage_bps: int, user_id: str = None) -> dict:
     total_sol_to_spend = float(amount)
-    fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
+    user_id_int = int(user_id) if user_id else 0
+    
+    # Calculate fee with referral discount if applicable
+    if user_id_int:
+        fee_amount_ui = _fee_ui_with_discount(total_sol_to_spend, user_id_int) if FEE_ENABLED else 0.0
+    else:
+        fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
+        
     actual_swap_amount_ui = total_sol_to_spend - fee_amount_ui
     if actual_swap_amount_ui <= 0:
         return {"status": "error", "message": "❌ Amount is too small after fee."}
@@ -3664,6 +4044,29 @@ async def _handle_trade_response(
                 pass
 
         sig = res.get("signature") or res.get("bundle")
+        
+        # Calculate and distribute referral rewards
+        try:
+            if trade_type == "buy":
+                # For buy trades, calculate fee from the amount that was spent
+                traded_amount_sol = abs(pre_sol_ui - post_sol_ui)  # Actual SOL spent including fees
+                platform_fee_sol = _fee_ui_with_discount(traded_amount_sol, user_id) if FEE_ENABLED else 0.0
+            else:  # sell
+                # For sell trades, calculate fee from the SOL received 
+                traded_amount_sol = abs(post_sol_ui - pre_sol_ui)  # SOL received from sale
+                platform_fee_sol = _fee_ui_with_discount(traded_amount_sol, user_id) if FEE_ENABLED else 0.0
+            
+            # Distribute referral rewards if there was a platform fee
+            if platform_fee_sol > 0 and sig:
+                await _distribute_referral_rewards(
+                    user_id=user_id,
+                    trade_mint=token_mint,
+                    trade_amount_sol=traded_amount_sol,
+                    platform_fee_sol=platform_fee_sol,
+                    trade_signature=sig
+                )
+        except Exception as e:
+            print(f"Error distributing referral rewards: {e}")
         
         # Get token symbol for better display with deep link
         try:
@@ -4363,6 +4766,12 @@ def main() -> None:
     # Jupiter optimization handlers
     application.add_handler(CallbackQueryHandler(handle_toggle_jupiter_versioned, pattern=r"^toggle_jupiter_versioned$"))
     application.add_handler(CallbackQueryHandler(handle_toggle_jupiter_preflight, pattern=r"^toggle_jupiter_preflight$"))
+    
+    # --- Referral System Handlers ---
+    application.add_handler(CallbackQueryHandler(handle_referral_menu, pattern=r"^referral_menu$"))
+    application.add_handler(CallbackQueryHandler(handle_copy_referral_link, pattern=r"^copy_referral_link$"))
+    application.add_handler(CallbackQueryHandler(handle_view_referral_earnings, pattern=r"^view_referral_earnings$"))
+    application.add_handler(CallbackQueryHandler(handle_detailed_referral_stats, pattern=r"^detailed_referral_stats$"))
     
     # Other dummy handlers
     application.add_handler(
