@@ -963,7 +963,7 @@ def token_panel_keyboard(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> In
     ])
     return InlineKeyboardMarkup(kb)
 
-async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = False) -> str:
+async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = False, context=None) -> str:
     """Compact summary with price & LP from Dexscreener; unknown -> N/A."""
     wallet_info = database.get_user_wallet(user_id)
     addr = wallet_info.get("address", "--") if wallet_info else "--"
@@ -1058,12 +1058,15 @@ async def build_token_panel(user_id: int, mint: str, *, force_fresh: bool = Fals
     refresh_indicator = "🔴 LIVE" if force_fresh else "📊"
 
     lines = []
-    # Make token symbol in panel header clickable (self-referencing for refresh/reload)
+    # Make token symbol in panel header clickable with deeplink
     try:
-        from telegram.ext import ContextTypes
-        # We don't have context here, so we'll use bot username detection differently
         symbol_clean = display_name.replace("$", "") if display_name.startswith("$") else display_name
-        lines.append(f"Swap <b>${symbol_clean}</b> 📈")
+        bot_username = getattr(context.bot, "username", "") if context else os.getenv("TELEGRAM_BOT_USERNAME", "")
+        if bot_username:
+            trade_deeplink = f"https://t.me/{bot_username}?start=trade_{mint}"
+            lines.append(f"Swap <b><a href='{trade_deeplink}'>${symbol_clean}</a></b> 📈")
+        else:
+            lines.append(f"Swap <b>${symbol_clean}</b> 📈")
     except:
         lines.append(f"Swap <b>{display_name}</b> 📈")
     lines.append("")
@@ -1100,7 +1103,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if payload.startswith("trade_"):
             mint = payload.split("_", 1)[1]
             context.user_data["trade_mint"] = mint
-            panel = await build_token_panel(user_id, mint)
+            panel = await build_token_panel(user_id, mint, context=context)
             resp = await update.message.reply_html(panel, reply_markup=token_panel_keyboard(context, user_id))
             await track_bot_message(context, resp.message_id)
             return
@@ -1125,15 +1128,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             img_bytes = _draw_pnl_card_image(
                 data["symbol"], data["mint"], data["pnl_pct"], data["total_invested"], data["current_value"], data["pnl_usd"],
             )
-            caption = (
-                f"${data['symbol']}\nPnL: {data['pnl_pct']*100:+.1f}% | "
-                f"Invested: {format_usd(data['total_invested'])} | Value: {format_usd(data['current_value'])} | "
-                f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
-            )
+            # Create deeplink for symbol in PnL caption
+            try:
+                bot_username = getattr(context.bot, "username", "") if context else os.getenv("TELEGRAM_BOT_USERNAME", "")
+                if bot_username:
+                    trade_deeplink = f"https://t.me/{bot_username}?start=trade_{data['mint']}"
+                    clickable_symbol = f"<a href='{trade_deeplink}'><b>${data['symbol']}</b></a>"
+                    caption = (
+                        f"{clickable_symbol}\nPnL: {data['pnl_pct']*100:+.1f}% | "
+                        f"Invested: {format_usd(data['total_invested'])} | Value: {format_usd(data['current_value'])} | "
+                        f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                    )
+                else:
+                    caption = (
+                        f"${data['symbol']}\nPnL: {data['pnl_pct']*100:+.1f}% | "
+                        f"Invested: {format_usd(data['total_invested'])} | Value: {format_usd(data['current_value'])} | "
+                        f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                    )
+            except:
+                caption = (
+                    f"${data['symbol']}\nPnL: {data['pnl_pct']*100:+.1f}% | "
+                    f"Invested: {format_usd(data['total_invested'])} | Value: {format_usd(data['current_value'])} | "
+                    f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                )
             if img_bytes:
-                resp = await update.message.reply_photo(photo=BytesIO(img_bytes), caption=caption)
+                resp = await update.message.reply_photo(photo=BytesIO(img_bytes), caption=caption, parse_mode="HTML")
             else:
-                resp = await update.message.reply_text(caption)
+                resp = await update.message.reply_html(caption)
             await track_bot_message(context, resp.message_id)
             return
         
@@ -1647,26 +1668,69 @@ async def handle_share_portfolio_pnl(q, context: ContextTypes.DEFAULT_TYPE, mint
             data["symbol"], data["mint"], data["pnl_pct"], data["total_invested"], data["current_value"], data["pnl_usd"],
         )
 
-        caption = (
-            f"${data['symbol']}\n"
-            f"PnL: {data['pnl_pct']*100:+.1f}%\n"
-            f"Invested: {format_usd(data['total_invested'])}  |  "
-            f"Value: {format_usd(data['current_value'])}  |  "
-            f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
-        )
+        # Create deeplink for symbol in PnL caption
+        try:
+            bot_username = getattr(context.bot, "username", "") if context else os.getenv("TELEGRAM_BOT_USERNAME", "")
+            if bot_username:
+                trade_deeplink = f"https://t.me/{bot_username}?start=trade_{data['mint']}"
+                clickable_symbol = f"<a href='{trade_deeplink}'><b>${data['symbol']}</b></a>"
+                caption = (
+                    f"{clickable_symbol}\n"
+                    f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                    f"Invested: {format_usd(data['total_invested'])}  |  "
+                    f"Value: {format_usd(data['current_value'])}  |  "
+                    f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                )
+            else:
+                caption = (
+                    f"${data['symbol']}\n"
+                    f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                    f"Invested: {format_usd(data['total_invested'])}  |  "
+                    f"Value: {format_usd(data['current_value'])}  |  "
+                    f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                )
+        except:
+            caption = (
+                f"${data['symbol']}\n"
+                f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                f"Invested: {format_usd(data['total_invested'])}  |  "
+                f"Value: {format_usd(data['current_value'])}  |  "
+                f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+            )
 
         if img_bytes:
-            await q.message.reply_photo(photo=BytesIO(img_bytes), caption=caption)
+            await q.message.reply_photo(photo=BytesIO(img_bytes), caption=caption, parse_mode="HTML")
         else:
-            # Fallback text card
-            await q.message.reply_html(
-                f"<b>PnL CARD</b>\n\n<b>${data['symbol']}</b>\n<code>{data['mint'][:8]}…{data['mint'][-8:]}</code>\n\n"
-                f"PnL: {data['pnl_pct']*100:+.1f}%\n"
-                f"Total Invested: {format_usd(data['total_invested'])}\n"
-                f"Current Value: {format_usd(data['current_value'])}\n"
-                f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}",
-                disable_web_page_preview=True,
-            )
+            # Fallback text card with deeplink
+            try:
+                bot_username = getattr(context.bot, "username", "") if context else os.getenv("TELEGRAM_BOT_USERNAME", "")
+                if bot_username:
+                    trade_deeplink = f"https://t.me/{bot_username}?start=trade_{data['mint']}"
+                    clickable_symbol = f"<a href='{trade_deeplink}'><b>${data['symbol']}</b></a>"
+                    fallback_text = (
+                        f"<b>PnL CARD</b>\n\n{clickable_symbol}\n<code>{data['mint'][:8]}…{data['mint'][-8:]}</code>\n\n"
+                        f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                        f"Total Invested: {format_usd(data['total_invested'])}\n"
+                        f"Current Value: {format_usd(data['current_value'])}\n"
+                        f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                    )
+                else:
+                    fallback_text = (
+                        f"<b>PnL CARD</b>\n\n<b>${data['symbol']}</b>\n<code>{data['mint'][:8]}…{data['mint'][-8:]}</code>\n\n"
+                        f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                        f"Total Invested: {format_usd(data['total_invested'])}\n"
+                        f"Current Value: {format_usd(data['current_value'])}\n"
+                        f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                    )
+            except:
+                fallback_text = (
+                    f"<b>PnL CARD</b>\n\n<b>${data['symbol']}</b>\n<code>{data['mint'][:8]}…{data['mint'][-8:]}</code>\n\n"
+                    f"PnL: {data['pnl_pct']*100:+.1f}%\n"
+                    f"Total Invested: {format_usd(data['total_invested'])}\n"
+                    f"Current Value: {format_usd(data['current_value'])}\n"
+                    f"{'Profit' if data['pnl_usd']>=0 else 'Loss'}: {format_usd(abs(data['pnl_usd']))}"
+                )
+            await q.message.reply_html(fallback_text, disable_web_page_preview=True)
     except Exception as e:
         response = await q.message.reply_text(f"❌ Error sharing PnL: {e}")
         await track_bot_message(context, response.message_id)
@@ -1693,7 +1757,7 @@ async def handle_trade(q, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Build and display token panel
-        panel = await build_token_panel(user_id, mint)
+        panel = await build_token_panel(user_id, mint, context=context)
         await q.edit_message_text(
             panel,
             reply_markup=token_panel_keyboard(context, user_id),
@@ -2723,7 +2787,7 @@ async def handle_back_to_token_panel(update: Update, context: ContextTypes.DEFAU
     mint = context.user_data.get("token_address")
     if not mint:
         return await handle_back_to_buy_sell_menu(update, context)
-    panel = await build_token_panel(q.from_user.id, mint)
+    panel = await build_token_panel(q.from_user.id, mint, context=context)
     await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context, q.from_user.id), parse_mode="HTML")
     return AWAITING_TRADE_ACTION
 
@@ -2739,7 +2803,7 @@ async def handle_back_to_token_panel_outside_conv(update: Update, context: Conte
     # Build fresh token panel
     q = update.callback_query
     await q.answer()
-    panel = await build_token_panel(q.from_user.id, mint)
+    panel = await build_token_panel(q.from_user.id, mint, context=context)
     
     # Reset conversation state cleanly - force restart conversation
     # This ensures buttons will work properly
@@ -2818,7 +2882,7 @@ async def handle_refresh_token_panel_outside_conv(update: Update, context: Conte
     try:
         user_id = query.from_user.id
         # Force fresh data refresh
-        panel = await build_token_panel(user_id, mint, force_fresh=True)
+        panel = await build_token_panel(user_id, mint, force_fresh=True, context=context)
         
         # Update message with fresh data
         await query.edit_message_text(panel, reply_markup=token_panel_keyboard(context, user_id), parse_mode="HTML")
@@ -3303,7 +3367,7 @@ async def handle_token_address_for_trade(update: Update, context: ContextTypes.D
     context.user_data["selected_dex"] = "jupiter"  # fixed route
     # Slippage now managed through database settings
 
-    panel = await build_token_panel(update.effective_user.id, token_address)
+    panel = await build_token_panel(update.effective_user.id, token_address, context=context)
     response = await message.reply_html(panel, reply_markup=token_panel_keyboard(context, update.effective_user.id))
     await track_bot_message(context, response.message_id)
     return AWAITING_TRADE_ACTION
@@ -3322,7 +3386,7 @@ async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAU
     
     try:
         # Build panel with FORCED fresh data - no cache used
-        panel = await build_token_panel(q.from_user.id, mint, force_fresh=True)
+        panel = await build_token_panel(q.from_user.id, mint, force_fresh=True, context=context)
         
         # Update message with fresh data
         await q.edit_message_text(panel, reply_markup=token_panel_keyboard(context, q.from_user.id), parse_mode="HTML")
@@ -3621,7 +3685,7 @@ async def _handle_trade_response(
         # Get fresh trading panel after successful trade
         try:
             # user_id already passed as parameter
-            fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True)
+            fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True, context=context)
             
             # Combine success message with fresh trading panel
             extra = ""
@@ -3670,7 +3734,7 @@ async def _handle_trade_response(
         
         # Get fresh trading panel after failed trade for easy retry
         try:
-            fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True)
+            fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True, context=context)
             combined_message = f"{error_msg}\n\n━━━━━━━━━━━━━━━━━━━━\n{fresh_panel}"
             response = await message.reply_html(combined_message, reply_markup=token_panel_keyboard(context, user_id))
             # Track the response message for cleanup
@@ -3928,7 +3992,7 @@ async def handle_set_slippage_value(update: Update, context: ContextTypes.DEFAUL
         chat_id = update.effective_chat.id
         await ensure_message_cleanup_on_user_action(context, chat_id)
         
-        panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""))
+        panel = await build_token_panel(update.effective_user.id, context.user_data.get("token_address", ""), context=context)
         
         # Show success message with updated panel in ONE message
         success_msg = f"✅ Slippage {tgt.upper()} set to {pct:.0f}%.\n\n{panel}"
