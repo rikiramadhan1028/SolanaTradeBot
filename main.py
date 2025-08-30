@@ -2924,6 +2924,10 @@ async def handle_buy_sell_action_outside_conv(update: Update, context: ContextTy
     except Exception as e:
         print(f"Error answering outside conv callback query: {e}")
     
+    # Clean up previous messages when user takes new trading action
+    chat_id = update.effective_chat.id
+    await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    
     action = query.data
     print(f"[DEBUG] Trading button pressed (outside conv): {action} by user {query.from_user.id}")
     
@@ -2980,6 +2984,10 @@ async def handle_refresh_token_panel_outside_conv(update: Update, context: Conte
     """Handle token panel refresh outside conversation context"""
     query = update.callback_query
     await query.answer()
+    
+    # Clean up previous messages when user refreshes
+    chat_id = update.effective_chat.id
+    await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
     
     # Get token mint from context
     mint = context.user_data.get("trade_mint") or context.user_data.get("token_address")
@@ -3777,6 +3785,10 @@ async def handle_refresh_token_panel(update: Update, context: ContextTypes.DEFAU
         await q.answer("No token selected")
         return await handle_back_to_buy_sell_menu(update, context)
     
+    # Clean up previous messages when user refreshes
+    chat_id = update.effective_chat.id
+    await delete_all_bot_messages_except_current(context, chat_id, q.message.message_id)
+    
     # Immediate feedback with unique ID - show refresh is happening
     refresh_id = str(int(time.time() * 1000))[-4:]  # Last 4 digits of timestamp
     await q.answer(f"🔄 Refreshing #{refresh_id}...", show_alert=False)
@@ -3806,6 +3818,10 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
     except Exception as e:
         print(f"Error answering callback query: {e}")
+    
+    # Clean up previous messages when user takes new trading action
+    chat_id = update.effective_chat.id
+    await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
     
     action = query.data
     print(f"[DEBUG] Trading button pressed: {action} by user {query.from_user.id}")
