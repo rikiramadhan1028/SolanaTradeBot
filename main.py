@@ -2902,10 +2902,17 @@ async def handle_back_to_token_panel_outside_conv(update: Update, context: Conte
 async def handle_buy_sell_action_outside_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle trading buttons outside conversation context (from deep links)"""
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        print(f"Error answering outside conv callback query: {e}")
+    
+    action = query.data
+    print(f"[DEBUG] Trading button pressed (outside conv): {action} by user {query.from_user.id}")
     
     # Ensure we have token_address in context for trading
     mint = context.user_data.get("trade_mint") or context.user_data.get("token_address")
+    print(f"[DEBUG] Token mint in context: {mint}")
     if not mint:
         await query.edit_message_text(
             "❌ No token selected for trading.",
@@ -3778,17 +3785,31 @@ async def handle_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        print(f"Error answering callback query: {e}")
+    
     action = query.data
+    print(f"[DEBUG] Trading button pressed: {action} by user {query.from_user.id}")
 
     if action.startswith("buy_fixed_"):
-        amount_str = action.split("_")[-1]
-        amount = float(amount_str)
-        context.user_data["trade_type"] = "buy"
-        context.user_data["amount_type"] = "sol"
-        result = await perform_trade(update, context, amount)
-        # Only end conversation if trade was successful 
-        return ConversationHandler.END if result else AWAITING_TRADE_ACTION
+        try:
+            amount_str = action.split("_")[-1]
+            amount = float(amount_str)
+            context.user_data["trade_type"] = "buy"
+            context.user_data["amount_type"] = "sol"
+            print(f"[DEBUG] Executing buy trade: {amount} SOL")
+            result = await perform_trade(update, context, amount)
+            # Only end conversation if trade was successful 
+            return ConversationHandler.END if result else AWAITING_TRADE_ACTION
+        except Exception as e:
+            print(f"[ERROR] Buy trade failed: {e}")
+            await query.edit_message_text(
+                f"❌ Trade failed: {str(e)[:100]}",
+                reply_markup=back_markup("back_to_token_panel"),
+            )
+            return AWAITING_TRADE_ACTION
 
     elif action == "buy_custom":
         context.user_data["trade_type"] = "buy"
@@ -3800,13 +3821,22 @@ async def handle_buy_sell_action(update: Update, context: ContextTypes.DEFAULT_T
         return AWAITING_AMOUNT
 
     elif action.startswith("sell_pct_"):
-        percentage_str = action.split("_")[-1]
-        percentage = int(percentage_str)
-        context.user_data["trade_type"] = "sell"
-        context.user_data["amount_type"] = "percentage"
-        result = await perform_trade(update, context, percentage)
-        # Only end conversation if trade was successful
-        return ConversationHandler.END if result else AWAITING_TRADE_ACTION
+        try:
+            percentage_str = action.split("_")[-1]
+            percentage = int(percentage_str)
+            context.user_data["trade_type"] = "sell"
+            context.user_data["amount_type"] = "percentage"
+            print(f"[DEBUG] Executing sell trade: {percentage}%")
+            result = await perform_trade(update, context, percentage)
+            # Only end conversation if trade was successful
+            return ConversationHandler.END if result else AWAITING_TRADE_ACTION
+        except Exception as e:
+            print(f"[ERROR] Sell trade failed: {e}")
+            await query.edit_message_text(
+                f"❌ Trade failed: {str(e)[:100]}",
+                reply_markup=back_markup("back_to_token_panel"),
+            )
+            return AWAITING_TRADE_ACTION
 
     await query.message.reply_text(
         "This action is not yet implemented.",
@@ -4851,8 +4881,10 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(pumpfun_back_to_panel_outside_conv, pattern="^pumpfun_back_to_panel$"))
     
     # --- Trading button handlers (needed outside conversations for deep links) ---
-    application.add_handler(CallbackQueryHandler(handle_buy_sell_action_outside_conv, pattern="^(buy_fixed_.*|buy_custom|sell_pct_.*)$"))
-    application.add_handler(CallbackQueryHandler(handle_refresh_token_panel_outside_conv, pattern="^token_panel_refresh$"))
+    # NOTE: These handlers should have lower priority than ConversationHandler
+    # Use group parameter to ensure ConversationHandler is processed first
+    application.add_handler(CallbackQueryHandler(handle_buy_sell_action_outside_conv, pattern="^(buy_fixed_.*|buy_custom|sell_pct_.*)$"), group=1)
+    application.add_handler(CallbackQueryHandler(handle_refresh_token_panel_outside_conv, pattern="^token_panel_refresh$"), group=1)
 
     # --- Other callback menus ---
     application.add_handler(CallbackQueryHandler(handle_assets, pattern="^view_assets$"))
