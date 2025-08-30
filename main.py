@@ -862,8 +862,10 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
         referral_info = create_referral_code(user_id)
     
     # Generate referral link with proper bot username
-    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "RokuTrade") 
-    referral_link = f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
+    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+    referral_link = (
+        f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
+        if bot_username else f"Use code: {referral_info['referral_code']}" )
     
     # Get referral stats for display
     referral_stats = get_referral_stats(user_id)
@@ -1199,7 +1201,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Referral Code Deep Links
         elif payload.startswith("ref_"):
-            referral_code = payload.split("_", 1)[1]
+            raw = payload.split("_", 1)[1]
+            referral_code = re.sub(r"[^A-Za-z0-9]", "", (raw or "").strip())
             await handle_referral_signup(update, context, referral_code)
             return
 
@@ -3047,7 +3050,7 @@ async def handle_referral_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     stats = get_referral_stats(user_id)
     
     # Get bot username for referral link
-    bot_username = getattr(context.bot, "username", "") or os.getenv("TELEGRAM_BOT_USERNAME", "")
+    bot_username = (getattr(context.bot, "username", "") or os.getenv("TELEGRAM_BOT_USERNAME", "")).lstrip("@")
     if bot_username:
         referral_link = f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
     else:
@@ -3117,9 +3120,10 @@ async def handle_copy_referral_link(update: Update, context: ContextTypes.DEFAUL
     referral_info = get_referral_info(user_id)
     
     if referral_info:
-        bot_username = getattr(context.bot, "username", "") or os.getenv("TELEGRAM_BOT_USERNAME", "")
+        bot_username = (getattr(context.bot, "username", "") or os.getenv("TELEGRAM_BOT_USERNAME", "")).lstrip("@")
         if bot_username:
             referral_link = f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
+
             
             # Send referral link as a separate message for easy copying
             msg = await query.message.reply_text(

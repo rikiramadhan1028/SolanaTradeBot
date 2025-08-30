@@ -1,5 +1,5 @@
 # file: database.py
-import os, time
+import os, time, re
 from typing import Optional, Dict, Any
 
 from pymongo import MongoClient, ASCENDING
@@ -506,6 +506,55 @@ def create_referral_code(user_id: int, referred_by_code: str = None) -> dict:
     
     referral_codes_collection.insert_one(doc)
     return doc
+
+def normalize_ref_code(raw: str | None) -> str:
+    """Bersihkan non-alfanumerik dan uppercase agar cocok index DB."""
+    return re.sub(r"[^A-Za-z0-9]", "", (raw or "").strip()).upper()
+
+def ensure_referral_code(user_id: int, referred_by_code: str | None = None) -> dict:
+    """
+    Pastikan user punya referral_code. Kalau belum ada → buat.
+    Jika referred_by_code ada, otomatis set relasi saat kreasi awal.
+    """
+    existing = referral_codes_collection.find_one({"user_id": int(user_id)})
+    if existing:
+        return existing
+    code_norm = normalize_ref_code(referred_by_code) if referred_by_code else None
+    return create_referral_code(user_id=int(user_id), referred_by_code=code_norm)
+
+def referral_attach_referrer(user_id: int, referred_by_code: str) -> bool:
+    """
+    Set referrer untuk user yang SUDAH punya doc referral (sekali saja).
+    Cegah self-referral & double attach. Return True jika sukses attach.
+    """
+    user_id = int(user_id)
+    doc = referral_codes_collection.find_one({"user_id": user_id})
+    if not doc:
+        ensure_referral_code(user_id, referred_by_code)
+        return True
+
+    if doc.get("referred_by_user_id"):
+        return False
+
+    code = normalize_ref_code(referred_by_code)
+    referrer = referral_codes_collection.find_one({"referral_code": code})
+    if (not referrer) or (int(referrer["user_id"]) == user_id):
+        return False
+
+    now = int(time.time())
+    referral_codes_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "referred_by_user_id": int(referrer["user_id"]),
+            "referred_by_code": code,
+            "updated_at": now
+        }}
+    )
+    referral_codes_collection.update_one(
+        {"user_id": int(referrer["user_id"])},
+        {"$inc": {"referral_count": 1}, "$set": {"updated_at": now}}
+    )
+    return True
 
 def get_referral_info(user_id: int) -> dict:
     """Get referral info for a user."""
