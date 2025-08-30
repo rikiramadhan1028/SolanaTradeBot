@@ -2,8 +2,8 @@
 import os, time, re
 from typing import Optional, Dict, Any
 
-from pymongo import MongoClient, ASCENDING, DuplicateKeyError
-
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
 from cryptography.fernet import Fernet, InvalidToken
 from base64 import urlsafe_b64encode
 from hashlib import sha256
