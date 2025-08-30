@@ -3908,12 +3908,12 @@ async def _calculate_referral_discount(user_id: int) -> float:
         return 0.9  # 10% discount
     return 1.0  # No discount
 
-def _fee_ui_with_discount(val_ui: float, user_id: int) -> float:
+async def _fee_ui_with_discount(val_ui: float, user_id: int) -> float:
     """Calculate fee with referral discount applied."""
     if not FEE_ENABLED:
         return 0.0
     base_fee = max(0.0, float(val_ui) * (FEE_BPS / 10_000.0))
-    discount_multiplier = asyncio.run(_calculate_referral_discount(user_id))
+    discount_multiplier = await _calculate_referral_discount(user_id)
     return base_fee * discount_multiplier
 
 async def _distribute_referral_rewards(
@@ -3991,7 +3991,7 @@ async def _prepare_buy_trade(wallet: dict, amount: float, token_mint: str, slipp
     
     # Calculate fee with referral discount if applicable
     if user_id_int:
-        fee_amount_ui = _fee_ui_with_discount(total_sol_to_spend, user_id_int) if FEE_ENABLED else 0.0
+        fee_amount_ui = await _fee_ui_with_discount(total_sol_to_spend, user_id_int) if FEE_ENABLED else 0.0
     else:
         fee_amount_ui = _fee_ui(total_sol_to_spend) if FEE_ENABLED else 0.0
         
@@ -4163,11 +4163,11 @@ async def _handle_trade_response(
             if trade_type == "buy":
                 # For buy trades, calculate fee from the amount that was spent
                 traded_amount_sol = abs(pre_sol_ui - post_sol_ui)  # Actual SOL spent including fees
-                platform_fee_sol = _fee_ui_with_discount(traded_amount_sol, user_id) if FEE_ENABLED else 0.0
+                platform_fee_sol = await _fee_ui_with_discount(traded_amount_sol, user_id) if FEE_ENABLED else 0.0
             else:  # sell
                 # For sell trades, calculate fee from the SOL received 
                 traded_amount_sol = abs(post_sol_ui - pre_sol_ui)  # SOL received from sale
-                platform_fee_sol = _fee_ui_with_discount(traded_amount_sol, user_id) if FEE_ENABLED else 0.0
+                platform_fee_sol = await _fee_ui_with_discount(traded_amount_sol, user_id) if FEE_ENABLED else 0.0
             
             # Distribute referral rewards if there was a platform fee
             if platform_fee_sol > 0 and sig:
