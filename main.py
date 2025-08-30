@@ -825,7 +825,7 @@ def get_start_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📉 Limit Order", callback_data="limit_order"),
-            InlineKeyboardButton("🏆 Invite Friends", callback_data="invite_friends"),
+            InlineKeyboardButton("🏆 Invite Friends", callback_data="referral_menu"),
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings"),
@@ -856,11 +856,29 @@ async def get_dynamic_start_message_text(user_id: int, user_mention: str) -> str
             sol_balance_str = "Error"
             usd_str = "N/A"
 
+    # Get or create referral info for auto-generated referral link
+    referral_info = get_referral_info(user_id)
+    if not referral_info:
+        referral_info = create_referral_code(user_id)
+    
+    # Generate referral link with proper bot username
+    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "RokuTrade") 
+    referral_link = f"https://t.me/{bot_username}?start=ref_{referral_info['referral_code']}"
+    
+    # Get referral stats for display
+    referral_stats = get_referral_stats(user_id)
+    total_referrals = referral_stats.get('referral_count', 0) if referral_stats else 0
+    total_earned = referral_stats.get('total_earned', 0) if referral_stats else 0
+
     return (
         f"👋 Hello {user_mention}! Welcome to <b>RokuTrade</b>\n\n"
         f"Wallet address: <code>{solana_address}</code>\n"
         f"Wallet balance: <code>{sol_balance_str}</code> ({usd_str})\n\n"
-        f"🔗 Referral link: https://t.me/RokuTrade?start=ref_{user_id}\n\n"
+        f"🎁 <b>Your Referral</b>\n"
+        f"Code: <code>{referral_info['referral_code']}</code> | "
+        f"Referrals: {total_referrals} | "
+        f"Earned: {total_earned:.4f} SOL\n"
+        f"Link: <code>{referral_link}</code>\n\n"
         f"✅ Send a contract address to start trading."
     )
 
@@ -4873,7 +4891,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             dummy_response,
-            pattern=r"^(invite_friends|copy_trading|limit_order|change_language|menu_help)$",
+            pattern=r"^(copy_trading|limit_order|change_language|menu_help)$",
         )
     )
 
