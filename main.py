@@ -771,6 +771,23 @@ async def get_sol_price_usd() -> float:
 
 # ================== Start menu, wallet, etc ==================
 def clear_user_context(context: ContextTypes.DEFAULT_TYPE):
+    """Clear user context but preserve important trading data"""
+    if hasattr(context, "user_data"):
+        # Preserve token context for continued trading after successful swaps
+        token_address = context.user_data.get("token_address")
+        trade_mint = context.user_data.get("trade_mint")
+        
+        # Clear all context data
+        context.user_data.clear()
+        
+        # Restore preserved token context 
+        if token_address:
+            context.user_data["token_address"] = token_address
+        if trade_mint:
+            context.user_data["trade_mint"] = trade_mint
+
+def clear_all_user_context(context: ContextTypes.DEFAULT_TYPE):
+    """Clear ALL user context data completely (for new conversations)"""
     if hasattr(context, "user_data"):
         context.user_data.clear()
 
@@ -1212,8 +1229,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Create referral code for new user
         create_referral_code(user_id)
 
-    # Default start menu
-    clear_user_context(context)
+    # Default start menu - clear ALL context for fresh start
+    clear_all_user_context(context)
     user_mention = update.effective_user.mention_html()
     welcome_text = await get_dynamic_start_message_text(user_id, user_mention)
     response = await update.message.reply_html(welcome_text, reply_markup=get_start_menu_keyboard(user_id))
