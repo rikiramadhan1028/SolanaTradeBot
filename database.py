@@ -2,7 +2,8 @@
 import os, time, re
 from typing import Optional, Dict, Any
 
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient, ASCENDING, DuplicateKeyError
+
 from cryptography.fernet import Fernet, InvalidToken
 from base64 import urlsafe_b64encode
 from hashlib import sha256
@@ -426,9 +427,10 @@ import string, secrets
 # doc shape:
 # {
 #   user_id: int,
-#   referral_code: str,           # unique 8-character code
+#   referral_code: str,            # unique 8-character code
+#   code: str,                     # mirror of referral_code (kompat ke index lama "code_1")
 #   referred_by_user_id: int|None, # who referred this user
-#   referred_by_code: str|None,    # original referral code used
+#   referred_by_code: str|None,    # original referral code used (uppercase, sanitized)
 #   total_earned_sol: float,       # total rewards earned
 #   referral_count: int,           # how many people they referred
 #   created_at: int,
@@ -437,6 +439,8 @@ import string, secrets
 referral_codes_collection = db["referral_codes"]
 referral_codes_collection.create_index([("user_id", ASCENDING)], unique=True)
 referral_codes_collection.create_index([("referral_code", ASCENDING)], unique=True)
+# Catatan: JANGAN paksa bikin index "code" di sini — beberapa DB kamu sudah punya index unik 'code_1'.
+# Kita cukup mirror field "code" supaya index lama tetap happy.
 
 # collection: referral_earnings
 # doc shape:
@@ -463,64 +467,99 @@ def generate_unique_referral_code() -> str:
     chars = string.ascii_uppercase + string.digits
     for _ in range(100):  # try up to 100 times to avoid infinite loop
         code = ''.join(secrets.choice(chars) for _ in range(8))
-        if not referral_codes_collection.find_one({"referral_code": code}):
+        # Pastikan tidak bentrok baik di referral_code maupun code (untuk safety)
+        if not referral_codes_collection.find_one({"$or": [{"referral_code": code}, {"code": code}] }):
             return code
     raise RuntimeError("Failed to generate unique referral code")
-
-def create_referral_code(user_id: int, referred_by_code: str = None) -> dict:
-    """Create a new referral code for a user, optionally with referrer."""
-    user_id = int(user_id)
-    now = int(time.time())
-    
-    # Check if user already has a referral code
-    existing = referral_codes_collection.find_one({"user_id": user_id})
-    if existing:
-        return existing
-    
-    # Generate unique code
-    referral_code = generate_unique_referral_code()
-    
-    # Find referrer info if referred_by_code provided
-    referred_by_user_id = None
-    if referred_by_code:
-        referrer = referral_codes_collection.find_one({"referral_code": referred_by_code.upper()})
-        if referrer:
-            referred_by_user_id = referrer["user_id"]
-            # Update referrer's count
-            referral_codes_collection.update_one(
-                {"user_id": referred_by_user_id},
-                {"$inc": {"referral_count": 1}, "$set": {"updated_at": now}}
-            )
-    
-    # Create new referral record
-    doc = {
-        "user_id": user_id,
-        "referral_code": referral_code,
-        "referred_by_user_id": referred_by_user_id,
-        "referred_by_code": referred_by_code.upper() if referred_by_code else None,
-        "total_earned_sol": 0.0,
-        "referral_count": 0,
-        "created_at": now,
-        "updated_at": now,
-    }
-    
-    referral_codes_collection.insert_one(doc)
-    return doc
 
 def normalize_ref_code(raw: str | None) -> str:
     """Bersihkan non-alfanumerik dan uppercase agar cocok index DB."""
     return re.sub(r"[^A-Za-z0-9]", "", (raw or "").strip()).upper()
+
+def create_referral_code(user_id: int, referred_by_code: str = None) -> dict:
+    """Create a new referral code for a user, optionally attach referrer."""
+    user_id = int(user_id)
+    now = int(time.time())
+
+    # Sudah punya? backfill 'code' kalau perlu, lalu return
+    existing = referral_codes_collection.find_one({"user_id": user_id})
+    if existing:
+        updates = {}
+        if not existing.get("code") and existing.get("referral_code"):
+            updates["code"] = str(existing["referral_code"]).upper()
+        if "total_earned_sol" not in existing:
+            updates["total_earned_sol"] = 0.0
+        if "referral_count" not in existing:
+            updates["referral_count"] = 0
+        if updates:
+            updates["updated_at"] = now
+            referral_codes_collection.update_one({"_id": existing["_id"]}, {"$set": updates})
+            existing.update(updates)
+        return existing
+
+    # Siapkan referrer kalau ada kode
+    ref_user_id = None
+    ref_code_norm = None
+    if referred_by_code:
+        ref_code_norm = normalize_ref_code(referred_by_code)
+        referrer = referral_codes_collection.find_one({
+            "$or": [{"referral_code": ref_code_norm}, {"code": ref_code_norm}]
+        })
+        if referrer and int(referrer["user_id"]) != user_id:
+            ref_user_id = int(referrer["user_id"])
+
+    # Insert dengan retry kalau bentrok uniq index
+    for _ in range(5):
+        new_code = generate_unique_referral_code()  # sudah uppercase + unik check
+        doc = {
+            "user_id": user_id,
+            "referral_code": new_code,
+            "code": new_code,                         # mirror untuk index lama "code_1"
+            "referred_by_user_id": ref_user_id,
+            "referred_by_code": (ref_code_norm if ref_user_id else None),
+            "total_earned_sol": 0.0,
+            "referral_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            referral_codes_collection.insert_one(doc)
+            # Jika valid referrer, increment count
+            if ref_user_id:
+                referral_codes_collection.update_one(
+                    {"user_id": ref_user_id},
+                    {"$inc": {"referral_count": 1}, "$set": {"updated_at": int(time.time())}}
+                )
+            return doc
+        except DuplicateKeyError:
+            # Bentrok di referral_code/code → ulangi generate
+            continue
+
+    raise RuntimeError("Failed to create unique referral code after retries")
 
 def ensure_referral_code(user_id: int, referred_by_code: str | None = None) -> dict:
     """
     Pastikan user punya referral_code. Kalau belum ada → buat.
     Jika referred_by_code ada, otomatis set relasi saat kreasi awal.
     """
-    existing = referral_codes_collection.find_one({"user_id": int(user_id)})
+    user_id = int(user_id)
+    existing = referral_codes_collection.find_one({"user_id": user_id})
     if existing:
+        # BACKFILL ringan agar aman di index lama "code_1"
+        updates = {}
+        if not existing.get("code") and existing.get("referral_code"):
+            updates["code"] = str(existing["referral_code"]).upper()
+        if "total_earned_sol" not in existing:
+            updates["total_earned_sol"] = 0.0
+        if "referral_count" not in existing:
+            updates["referral_count"] = 0
+        if updates:
+            updates["updated_at"] = int(time.time())
+            referral_codes_collection.update_one({"_id": existing["_id"]}, {"$set": updates})
+            existing.update(updates)
         return existing
     code_norm = normalize_ref_code(referred_by_code) if referred_by_code else None
-    return create_referral_code(user_id=int(user_id), referred_by_code=code_norm)
+    return create_referral_code(user_id=user_id, referred_by_code=code_norm)
 
 def referral_attach_referrer(user_id: int, referred_by_code: str) -> bool:
     """
@@ -528,16 +567,18 @@ def referral_attach_referrer(user_id: int, referred_by_code: str) -> bool:
     Cegah self-referral & double attach. Return True jika sukses attach.
     """
     user_id = int(user_id)
+    code = normalize_ref_code(referred_by_code)
     doc = referral_codes_collection.find_one({"user_id": user_id})
     if not doc:
-        ensure_referral_code(user_id, referred_by_code)
+        create_referral_code(user_id, referred_by_code=code)
         return True
 
     if doc.get("referred_by_user_id"):
         return False
 
-    code = normalize_ref_code(referred_by_code)
-    referrer = referral_codes_collection.find_one({"referral_code": code})
+    referrer = referral_codes_collection.find_one({
+        "$or": [{"referral_code": code}, {"code": code}]
+    })
     if (not referrer) or (int(referrer["user_id"]) == user_id):
         return False
 
@@ -557,13 +598,29 @@ def referral_attach_referrer(user_id: int, referred_by_code: str) -> bool:
     return True
 
 def get_referral_info(user_id: int) -> dict:
-    """Get referral info for a user."""
+    """Get referral info for a user (auto-backfill defaults)."""
     doc = referral_codes_collection.find_one({"user_id": int(user_id)})
-    return doc if doc else {}
+    if not doc:
+        return {}
+    updates = {}
+    if not doc.get("code") and doc.get("referral_code"):
+        updates["code"] = str(doc["referral_code"]).upper()
+    if "total_earned_sol" not in doc:
+        updates["total_earned_sol"] = 0.0
+    if "referral_count" not in doc:
+        updates["referral_count"] = 0
+    if updates:
+        updates["updated_at"] = int(time.time())
+        referral_codes_collection.update_one({"_id": doc["_id"]}, {"$set": updates})
+        doc.update(updates)
+    return doc
 
 def get_referral_by_code(referral_code: str) -> dict:
-    """Get referral info by referral code."""
-    doc = referral_codes_collection.find_one({"referral_code": referral_code.upper()})
+    """Get referral info by code (accepts 'referral_code' or legacy 'code')."""
+    c = normalize_ref_code(referral_code)
+    doc = referral_codes_collection.find_one({
+        "$or": [{"referral_code": c}, {"code": c}]
+    })
     return doc if doc else {}
 
 def add_referral_earning(
