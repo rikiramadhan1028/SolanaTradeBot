@@ -1246,7 +1246,19 @@ async def handle_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Clean up other tracked messages first, then render assets
     await delete_all_bot_messages_except_current(context, chat_id, q.message.message_id)
+    
+    # Preserve trading context when navigating to assets view
+    # Only clear context if not coming from trading flow
+    trade_mint = context.user_data.get("trade_mint")
+    token_address = context.user_data.get("token_address")
+    
     clear_user_context(context)
+    
+    # Restore trading context to allow seamless navigation back to trading
+    if trade_mint:
+        context.user_data["trade_mint"] = trade_mint
+    if token_address:
+        context.user_data["token_address"] = token_address
     
     await _render_assets_detailed_view(q, context)
 
@@ -1493,10 +1505,15 @@ async def _render_assets_detailed_view(q_or_msg, context: ContextTypes.DEFAULT_T
         await q_or_msg.edit_message_text(
             text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True
         )
+        # Track the edited message for cleanup
+        if hasattr(q_or_msg, "message") and q_or_msg.message:
+            await track_bot_message(context, q_or_msg.message.message_id)
     elif hasattr(q_or_msg, "reply_html"):
-        await q_or_msg.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
+        response = await q_or_msg.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
+        await track_bot_message(context, response.message_id)
     else:
-        await q_or_msg.message.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
+        response = await q_or_msg.message.reply_html(text, reply_markup=keyboard, disable_web_page_preview=True)
+        await track_bot_message(context, response.message_id)
 
 async def handle_assets_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -1944,7 +1961,18 @@ async def handle_copy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     # Clean up other tracked messages (but not the current one)
     await delete_all_bot_messages_except_current(context, chat_id, q.message.message_id)
+    
+    # Preserve trading context when navigating between menus
+    trade_mint = context.user_data.get("trade_mint")
+    token_address = context.user_data.get("token_address")
+    
     clear_user_context(context)
+    
+    # Restore trading context to allow seamless navigation
+    if trade_mint:
+        context.user_data["trade_mint"] = trade_mint
+    if token_address:
+        context.user_data["token_address"] = token_address
     
 def _is_pubkey(x: str) -> bool:
     try:
@@ -2160,7 +2188,18 @@ async def handle_wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Clean up other tracked messages (but not the current one)
     await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    
+    # Preserve trading context when navigating between menus
+    trade_mint = context.user_data.get("trade_mint")
+    token_address = context.user_data.get("token_address")
+    
     clear_user_context(context)
+    
+    # Restore trading context to allow seamless navigation
+    if trade_mint:
+        context.user_data["trade_mint"] = trade_mint
+    if token_address:
+        context.user_data["token_address"] = token_address
 
 async def handle_create_wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_user_context(context)
@@ -2775,7 +2814,18 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     # Clean up other tracked messages (but not the current one)
     await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    
+    # Preserve trading context when navigating between menus
+    trade_mint = context.user_data.get("trade_mint")
+    token_address = context.user_data.get("token_address")
+    
     clear_user_context(context)
+    
+    # Restore trading context to allow seamless navigation
+    if trade_mint:
+        context.user_data["trade_mint"] = trade_mint
+    if token_address:
+        context.user_data["token_address"] = token_address
 
 async def back_to_main_menu_and_end_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Ends the conversation and shows the main menu."""
@@ -3594,7 +3644,18 @@ async def buy_sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     # Clean up other tracked messages (but not the current one)
     await delete_all_bot_messages_except_current(context, chat_id, query.message.message_id)
+    
+    # Preserve trading context when navigating between menus
+    trade_mint = context.user_data.get("trade_mint")
+    token_address = context.user_data.get("token_address")
+    
     clear_user_context(context)
+    
+    # Restore trading context to allow seamless navigation
+    if trade_mint:
+        context.user_data["trade_mint"] = trade_mint
+    if token_address:
+        context.user_data["token_address"] = token_address
     
     return AWAITING_TOKEN_ADDRESS
 
@@ -4085,33 +4146,46 @@ async def _handle_trade_response(
         # Clean up all tracked messages (loading message already auto-deleted)
         await delete_all_bot_messages(context, message.chat_id)
         
-        # Get fresh trading panel after successful trade
+        # Send success message first (separate from trading panel)
+        extra = ""
+        if sig:
+            extra = f'\n🔗 <a href="{solscan_tx(sig)}">Solscan</a>\n<code>{sig}</code>'
+        
+        success_response = await message.reply_html(
+            f"{success_msg}{extra}",
+            disable_web_page_preview=True
+        )
+        await track_bot_message(context, success_response.message_id)
+        
+        # Auto-cleanup success message after 2 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, success_response.message_id, 2))
+        
+        # Send separate fresh trading panel
         try:
-            # user_id already passed as parameter
+            # Ensure token_address is set in context for trading panel buttons
+            context.user_data["token_address"] = token_mint
+            context.user_data["trade_mint"] = token_mint
+            
             fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True, context=context)
             
-            # Combine success message with fresh trading panel
-            extra = ""
-            if sig:
-                extra = f'\n🔗 <a href="{solscan_tx(sig)}">Solscan</a>\n<code>{sig}</code>'
-            
-            combined_message = f"{success_msg}{extra}\n\n━━━━━━━━━━━━━━━━━━━━\n{fresh_panel}"
-            
-            # Send combined message with trading panel keyboard
-            response = await message.reply_html(
-                combined_message, 
+            panel_response = await message.reply_html(
+                fresh_panel, 
                 reply_markup=token_panel_keyboard(context, user_id), 
                 disable_web_page_preview=True
             )
-            await track_bot_message(context, response.message_id)
-            
-            # Auto-cleanup combined message after 5 minutes (longer than success-only)
-            asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, response.message_id, 5))
+            await track_bot_message(context, panel_response.message_id)
             
         except Exception as e:
-            print(f"Error creating combined success+panel message: {e}")
-            # Fallback to regular success message
-            await reply_ok_html(message, success_msg, prev_cb=prev_cb, signature=sig, context=context)
+            print(f"Error creating separate trading panel: {e}")
+            # If panel fails, just show back button
+            back_button = InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back to Assets", callback_data="view_assets")
+            ]])
+            fallback_response = await message.reply_html(
+                "🔄 Continue trading:", 
+                reply_markup=back_button
+            )
+            await track_bot_message(context, fallback_response.message_id)
         
         context.user_data.pop("loading_message_id", None)
         return True
@@ -4135,17 +4209,39 @@ async def _handle_trade_response(
         # Clean up all tracked messages (loading message already auto-deleted)
         await delete_all_bot_messages(context, message.chat_id)
         
-        # Get fresh trading panel after failed trade for easy retry
+        # Send error message first
+        error_response = await message.reply_html(error_msg)
+        await track_bot_message(context, error_response.message_id)
+        
+        # Auto-cleanup error message after 3 minutes
+        asyncio.create_task(auto_cleanup_success_message(context, message.chat_id, error_response.message_id, 3))
+        
+        # Send separate fresh trading panel for retry
         try:
+            # Ensure token context is preserved
+            context.user_data["token_address"] = token_mint
+            context.user_data["trade_mint"] = token_mint
+            
             fresh_panel = await build_token_panel(user_id, token_mint, force_fresh=True, context=context)
-            combined_message = f"{error_msg}\n\n━━━━━━━━━━━━━━━━━━━━\n{fresh_panel}"
-            response = await message.reply_html(combined_message, reply_markup=token_panel_keyboard(context, user_id))
-            # Track the response message for cleanup
-            await track_bot_message(context, response.message_id)
+            
+            panel_response = await message.reply_html(
+                f"🔄 **Retry Trading:**\n{fresh_panel}", 
+                reply_markup=token_panel_keyboard(context, user_id),
+                parse_mode="HTML"
+            )
+            await track_bot_message(context, panel_response.message_id)
+            
         except Exception as e:
             print(f"Failed to show trading panel after error: {e}")
-            # Fallback to just error message
-            await reply_err_html(message, error_msg, prev_cb=prev_cb, context=context)
+            # Fallback to back button only
+            back_button = InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back to Assets", callback_data="view_assets")
+            ]])
+            fallback_response = await message.reply_html(
+                "🔄 Continue trading:", 
+                reply_markup=back_button
+            )
+            await track_bot_message(context, fallback_response.message_id)
         
         context.user_data.pop("loading_message_id", None)
         return False
